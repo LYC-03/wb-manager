@@ -1,0 +1,33 @@
+# ===== 个人数据 / 含密钥文件：绝对不能进公开仓库 =====
+config.json
+rules_local.py
+backups/
+history.jsonl
+naming/
+incident-backup/
+shots/
+port.txt
+archive-orig.json
+
+# 本机运行产物
+run*.log
+*.pyc
+__pycache__/
+
+# 作者个人的过程文档（README.md 才是公开文档）
+归类方案.md
+归类结果.md
+
+# 开发期自用校验脚本（引用了本机工具链路径）
+_check.js
+cdp_check.mjs
+cdp_check2.mjs
+cdp_demo.mjs
+cdp_check3.mjs
+
+# 演示环境（make_demo_env.py 的产物）
+demo-workspace/
+
+# 一次性修复/自用验收脚本（含本机路径，不入库）
+fix_merge.py
+cdp_ux.mjs

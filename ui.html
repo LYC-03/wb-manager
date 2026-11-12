@@ -1,0 +1,2455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>wb-manager · 会话管家</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230071e3'/%3E%3Cpath d='M18 20h28a7 7 0 0 1 7 7v10a7 7 0 0 1-7 7H31l-9 8v-8h-4a7 7 0 0 1-7-7V27a7 7 0 0 1 7-7z' fill='%23fff'/%3E%3Cpath d='M25 32l6 6 11-11' stroke='%230071e3' stroke-width='4.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f5f5f7;--card:#fff;--ink:#1d1d1f;--ink2:#6e6e73;--ink3:#86868b;
+  --line:#e5e5e7;--blue:#0071e3;--blue-bg:#eef5fd;
+  --warn:#b25e00;--warn-bg:#fff7e8;--bad:#c8322b;--bad-bg:#fdf0ef;
+  --ok:#1a7f4b;--ok-bg:#eef8f2;
+  --r8:8px;--r14:14px;--r22:22px;
+}
+html,body{width:100%;max-width:100%}
+body{
+  background:var(--bg);color:var(--ink);
+  font:400 16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+  padding:max(24px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right))
+          max(96px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left));
+}
+.wrap{max-width:1320px;margin:0 auto;width:100%}
+header{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap}
+h1{font-size:clamp(19px,3vw,24px);font-weight:600;letter-spacing:-.02em;line-height:1.2}
+.sub{margin-top:8px;color:var(--ink2);font-size:14px;word-break:break-all}
+.hdr-actions{display:flex;gap:8px;flex-wrap:wrap}
+
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:22px 0 16px}
+.stat{background:var(--card);border-radius:var(--r14);padding:14px 16px;min-width:0;
+  box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.stat .k{font-size:13px;color:var(--ink2)}
+.stat .v{font-size:clamp(17px,2.4vw,21px);font-weight:600;margin-top:2px;white-space:nowrap}
+.stat .d{font-size:12px;color:var(--ink3);margin-top:1px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.chip{appearance:none;font:inherit;font-size:14px;padding:8px 14px;min-height:44px;
+  border:1px solid var(--line);background:var(--card);color:var(--ink2);
+  border-radius:var(--r8);cursor:pointer;white-space:nowrap}
+.chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
+@media (hover:hover){.chip:hover{border-color:#cfcfd4}}
+.btn{appearance:none;font:inherit;font-size:15px;font-weight:500;padding:10px 18px;min-height:44px;
+  border:0;border-radius:var(--r8);background:var(--blue);color:#fff;cursor:pointer;white-space:nowrap}
+.btn:disabled{background:#c9c9ce;cursor:not-allowed}
+.btn.ghost{background:var(--card);color:var(--ink);border:1px solid var(--line)}
+@media (hover:hover){.btn:not(:disabled):hover{filter:brightness(.94)}}
+.btn:focus-visible,.chip:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+
+.card{background:var(--card);border-radius:var(--r14);overflow:hidden;
+  box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.tblwrap{overflow-x:auto}
+/* 表头跟走的两个前提：
+   1) 表格外不能有 overflow 祖先（.card 的 overflow:hidden 会挡住 sticky）
+   2) .tblwrap 自己不能变成滚动容器
+   所以宽屏放开 overflow，让页面自己滚，th 贴住视口顶。 */
+@media (min-width:769px){
+  .tblwrap{overflow:visible}
+  /* 只放开表格外面这层卡片，浮层里的卡片还要靠 overflow 滚动，不能一起改 */
+  .card.allowsticky{overflow:visible}
+}
+/* border-collapse:collapse 会让 th 的 sticky 在 Chrome 里失效，
+   所以要 separate + 间距 0，边框改由单元格自己画 */
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:14px;min-width:860px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{font-weight:600;font-size:13px;color:var(--ink2);white-space:nowrap;
+  position:sticky;top:0;background:var(--card);z-index:2;
+  box-shadow:inset 0 -1px 0 var(--line)}
+tbody tr:last-child td{border-bottom:0}
+@media (hover:hover){tbody tr:hover{background:#fafafb}}
+/* 归档行淡一点，一眼能看出它不是当前在用的 */
+tbody tr.isarch td.cur,tbody tr.isarch td.dir,tbody tr.isarch td.sug{opacity:.5}
+td.cur{color:var(--ink2);max-width:280px}
+td.cur span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td.dir{color:var(--ink3);font-size:13px;max-width:170px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+input[type=text]{font:inherit;font-size:14px;width:100%;min-width:200px;padding:7px 10px;
+  border:1px solid var(--line);border-radius:var(--r8);background:#fff;color:var(--ink)}
+input[type=text]:focus{outline:2px solid var(--blue);outline-offset:-1px;border-color:transparent}
+input[type=checkbox]{width:20px;height:20px;accent-color:var(--blue);cursor:pointer}
+.tag{display:inline-block;padding:2px 8px;border-radius:var(--r8);font-size:12px;
+  background:#f2f2f4;color:var(--ink2);white-space:nowrap}
+.tag.blue{background:var(--blue-bg);color:var(--blue)}
+.tag.warn{background:var(--warn-bg);color:var(--warn)}
+.tag.ok{background:var(--ok-bg);color:var(--ok)}
+.tag.bad{background:var(--bad-bg);color:var(--bad)}
+/* 正在使用的会话：搬它会把历史切两截，必须一眼看得见 */
+.tag.live{background:var(--bad-bg);color:var(--bad);font-weight:600}
+.tag.live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--bad);margin-right:5px;vertical-align:1px}
+.same{color:var(--ink3)}
+
+.footbar{display:none;position:fixed;left:0;right:0;bottom:0;background:rgba(255,255,255,.92);
+  backdrop-filter:blur(12px);border-top:1px solid var(--line);
+  padding:10px max(20px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left));
+  gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;z-index:10}
+.footbar .n{font-size:15px;color:var(--ink2)}
+.footbar .n b{color:var(--ink);font-size:17px}
+
+.panel{display:none;margin-top:16px}
+.panel.on{display:block;animation:fadein .22s ease-out}
+.blist{list-style:none}
+.blist li{display:flex;justify-content:space-between;align-items:center;gap:12px;
+  padding:12px 16px;border-bottom:1px solid var(--line);font-size:14px}
+.blist li:last-child{border-bottom:0}
+.blist .meta{color:var(--ink2);font-size:13px}
+
+.steps{margin:0;padding-left:20px;font-size:14px;line-height:1.75;color:var(--ink2)}
+.steps li{margin-bottom:4px}
+.steps code{background:#f2f2f4;border-radius:4px;padding:1px 5px;font-size:13px}
+.out{margin-top:12px;background:#f7f7f8;border-radius:var(--r8);padding:12px 14px;font-size:13px;
+  line-height:1.6;word-break:break-all}
+.out b{display:block;font-size:13px;margin-bottom:4px}
+.lab{display:block;font-size:14px;color:var(--ink2);margin:16px 0 6px}
+.ta{width:100%;font:inherit;font-size:13px;line-height:1.6;padding:10px 12px;
+  border:1px solid var(--line);border-radius:var(--r8);resize:vertical;
+  background:#fff;color:var(--ink)}
+.ta:focus{outline:2px solid var(--blue);outline-offset:-1px}
+.copy{margin-top:8px}
+.sub-h{font-size:15px;font-weight:600;margin:20px 0 6px;padding-top:16px;
+  border-top:1px solid var(--line)}
+.sub-h:first-of-type{border-top:0;padding-top:0;margin-top:8px}
+/* 浮层里的表：固定布局，别让某一列把别的列挤出可视区。
+   注意 box-sizing：th/td 有左右内边距，不加 border-box 的话
+   46%+36%+18% 再加三份 padding 就超过 100%，最后一列会被挤出画面。 */
+table.fit{table-layout:fixed;width:100%}
+table.fit th,table.fit td{box-sizing:border-box;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+table.fit td.dir{max-width:none}
+/* 操作历史用列表而不是表格：表格的百分比列宽在内嵌浏览器里会被内容撑开，
+   按钮列常被挤到可视区外，列表就稳得多 */
+.histrow{display:flex;align-items:center;gap:10px;padding:10px 0;
+  border-bottom:1px solid var(--line)}
+.histrow:last-child{border-bottom:0}
+.histmeta{display:flex;align-items:center;gap:8px;white-space:nowrap;flex:none}
+.histnote{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;color:var(--ink3);font-size:12px}
+.histrow .btn{flex:none}
+/* 数据急救列表：标题占满剩余宽度，其余列固定，别互相挤 */
+.trashname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-size:14px;color:var(--ink)}
+.histrow.faded{opacity:.45}
+
+/* 浮层：点开就在眼前，不用滚到页尾 */
+.sheet{display:none}
+.sheet.on{display:block;position:fixed;inset:0;z-index:30;
+  background:rgba(0,0,0,.28);margin:0;padding:0;animation:sheetin .18s ease-out}
+/* 二层详情弹窗：盖在第一层上面，专属返回键 */
+.sheet.on.sheet2{z-index:40;background:rgba(0,0,0,.42)}
+.sheet.on .card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:min(760px,92vw);max-height:82vh;overflow:auto;padding:26px 28px 22px;
+  box-shadow:0 18px 50px rgba(0,0,0,.22);animation:cardin .24s cubic-bezier(.32,.72,.36,1)}
+.sheet.on .card.wide{width:min(980px,94vw)}
+.sheet .close{position:absolute;right:12px;top:10px;appearance:none;border:0;
+  background:transparent;font-size:22px;line-height:1;color:var(--ink3);cursor:pointer;
+  width:36px;height:36px;border-radius:50%}
+.sheet .close:hover{background:#f0f0f2}
+@media (max-width:520px){
+  .sheet.on .card{width:94vw;max-height:86vh;top:auto;bottom:0;left:50%;
+    transform:translateX(-50%);border-radius:16px 16px 0 0;animation:cardin-m .24s ease-out}
+}
+
+.toast{position:fixed;left:50%;transform:translateX(-50%) translateY(6px);bottom:96px;
+  background:var(--ink);color:#fff;padding:10px 20px;border-radius:var(--r8);
+  font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;
+  z-index:80;max-width:90vw}
+.toast.on{opacity:1;transform:translateX(-50%)}
+/* 自建确认框。内置浏览器会屏蔽原生 confirm，用它等于点了没反应 */
+.askmask{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.28);
+  display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .18s}
+.askmask.on{opacity:1}
+.askbox{background:var(--card);border-radius:14px;padding:22px 24px 18px;
+  width:min(450px,88vw);box-shadow:0 18px 50px rgba(0,0,0,.22);
+  transform:translateY(8px);transition:transform .18s}
+.askmask.on .askbox{transform:none}
+.asktext{margin:0 0 20px;font-size:15px;line-height:1.65;white-space:pre-line;
+  color:var(--ink);word-break:break-word}
+.askbar{display:flex;gap:10px;justify-content:flex-end}
+/* 用 class 表示"暂时不能点"，而不是 disabled。
+   disabled 的按钮连 click 都不触发，用户点了完全没反馈，只能干瞪眼。 */
+.btn.disabled{opacity:.45;cursor:not-allowed}
+.btn.disabled:hover{background:var(--card)}
+/* 页面报错时顶到最上面，别让"点了没反应"变成哑巴 */
+.errbar{position:fixed;left:0;right:0;top:0;z-index:70;background:var(--bad-bg);
+  color:var(--bad);padding:10px 18px;font-size:13px;line-height:1.55;
+  border-bottom:1px solid var(--bad);display:none;white-space:pre-line;
+  max-height:40vh;overflow:auto}
+.errbar.on{display:block}
+.empty{color:var(--ink2);text-align:center;padding:40px 20px;font-size:14px}
+
+@media (max-width:768px){
+  html,body{overflow-x:hidden}
+  body{padding-left:16px;padding-right:16px}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  table{min-width:0}
+  th:nth-child(1),td:nth-child(1){width:44px}
+  th:hidden{}
+  table,thead,tbody,th,td,tr{display:block}
+  thead{display:none}
+  tbody tr{border-bottom:1px solid var(--line);padding:12px 0}
+  tbody td{border:0;padding:4px 12px;max-width:none}
+  td.cur::before{content:"当前 ";color:var(--ink3);font-size:12px}
+  td.sug::before{content:"建议 ";color:var(--ink3);font-size:12px}
+  td.dir{max-width:none}
+  td.pick{padding-top:10px}
+  /* 顶栏数据库路径在手机上只留一行，完整路径悬停看 title */
+  #dbpath{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:1;
+    overflow:hidden;font-size:12px}
+  /* 侧栏那种窄宽度下，底部按钮不能把「移到空间」挤出屏幕 */
+  .footbar{gap:6px;padding-left:12px;padding-right:12px}
+  .footbar .btn{font-size:13px;padding:8px 12px;min-height:38px}
+  .footbar .n{font-size:13px}
+  .footbar .n b{font-size:15px}
+}
+@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* ===== APP 化：logo + 视图导航 + 主页 ===== */
+body[data-view="sessions"] .footbar{display:flex}
+.appbrand{display:flex;align-items:center;gap:14px;min-width:0}
+.applogo{width:44px;height:44px;flex:none;border-radius:12px;display:grid;place-items:center;
+  background:var(--blue);box-shadow:0 4px 14px rgba(0,113,227,.25)}
+.applogo svg{width:28px;height:28px}
+.tabs{display:flex;gap:4px;margin-top:14px;border-bottom:1px solid var(--line)}
+.tab{appearance:none;border:0;background:transparent;font:inherit;font-size:14px;color:var(--ink2);
+  padding:10px 18px;cursor:pointer;min-height:38px;border-radius:10px 10px 0 0;
+  border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{background:#f5f5f7}
+.tab.on{color:var(--ink);font-weight:600;border-bottom-color:var(--blue)}
+.view{display:none}
+.view.on{display:block;animation:fadein .22s ease-out}
+.homecards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}
+.hcard{background:var(--card);border-radius:var(--r14);padding:16px;cursor:pointer;
+  border:1px solid transparent;display:flex;gap:12px;align-items:flex-start;text-align:left;
+  font:inherit;width:100%;min-height:88px;transition:transform .1s,box-shadow .15s}
+.hcard:hover{box-shadow:0 6px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
+.hcard:active{transform:scale(.98)}
+.hcard .hic{width:38px;height:38px;flex:none;border-radius:10px;display:grid;place-items:center;
+  background:var(--blue-bg);color:var(--blue)}
+.hcard .hic svg{width:20px;height:20px}
+.hcard .ht{font-size:15px;font-weight:600;color:var(--ink)}
+.hcard .hd{font-size:12.5px;color:var(--ink2);margin-top:3px;line-height:1.5}
+.hcard .badge{margin-left:auto;flex:none;font-size:12px;background:var(--blue-bg);color:var(--blue);
+  border-radius:999px;padding:2px 9px;font-weight:600;white-space:nowrap}
+.hcard.bad .badge{background:var(--bad-bg);color:var(--bad)}
+.homewarn{margin-top:16px}
+@media (max-width:768px){
+  .homecards{grid-template-columns:repeat(2,1fr)}
+  .applogo{width:38px;height:38px}
+  .tab{padding:10px 14px}
+}
+
+@keyframes sheetin{from{opacity:0}to{opacity:1}}
+@keyframes cardin{from{opacity:0;transform:translate(-50%,-50%) translateY(14px)}
+  to{opacity:1;transform:translate(-50%,-50%)}}
+@keyframes cardin-m{from{opacity:0;transform:translateX(-50%) translateY(24px)}
+  to{opacity:1;transform:translateX(-50%)}}
+@keyframes rowfade{from{opacity:0}to{opacity:1}}
+/* 列表刷新时整批淡入，0.15s 就结束，不给批量操作添堵 */
+tbody tr{animation:rowfade .15s ease-out}
+/* 按钮按下去轻微缩一下，松手弹回：给「点了有反应」一个触觉反馈 */
+.btn{transition:transform .1s}
+.btn:not(.disabled):active{transform:scale(.97)}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- SVG 图标集：统一描边、currentColor，无 emoji -->
+<svg style="display:none" aria-hidden="true">
+  <defs>
+    <symbol id="i-bubble" viewBox="0 0 24 24"><path d="M5 4.5h14a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5h-8.6L7 20.2V16.5H5A2.5 2.5 0 0 1 2.5 14V7A2.5 2.5 0 0 1 5 4.5z"/><path d="M8 12.2l2.6 2.6L16.4 9"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M13.5 4.5l4 4L8 18H4v-4z"/><path d="M11.5 6.5l4 4"/></symbol>
+    <symbol id="i-ai" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 15.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.6-3.2 8-7.5 9.5-4.3-1.5-7.5-4.9-7.5-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/></symbol>
+    <symbol id="i-broom" viewBox="0 0 24 24"><path d="M14 3l7 7"/><path d="M10.5 6.5L17.5 13.5"/><path d="M11.5 12.5L4 20c-.8.8-2 .8-2.5 0 .8.5.8-.7 0 0"/><path d="M11.5 12.5c2 2 2 4.5-.5 7l-6-6c2.5-2.5 4.5-3 6.5-1z"/></symbol>
+    <symbol id="i-backup" viewBox="0 0 24 24"><path d="M4 5v5h5"/><path d="M4.6 10A8 8 0 1 1 4 12"/><path d="M12 8v4.5l3 2"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 5v4.5H8"/><path d="M4.1 9.5a8 8 0 1 1-.6 4"/><path d="M12 8v4l2.8 1.8"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4.5l2 2.5H19a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/></symbol>
+  </defs>
+</svg>
+
+<header>
+  <div class="appbrand">
+    <span class="applogo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round"><use href="#i-bubble"/></svg>
+    </span>
+    <div>
+      <h1 style="font-size:19px">会话管家</h1>
+      <p class="sub" id="dbpath">正在读取…</p>
+      <p class="sub" id="platwarn" hidden
+         style="margin-top:6px;color:var(--warn);max-width:820px"></p>
+    </div>
+  </div>
+  <div class="hdr-actions">
+    <button class="btn ghost" id="btnBackup">备份一次</button>
+    <button class="btn ghost" id="btnReload">刷新</button>
+  </div>
+</header>
+
+<!-- 功能入口保留原按钮（主页卡片触发它们，handler 不变） -->
+<div hidden>
+  <button id="btnAi">AI 命名</button>
+  <button id="btnWs">工作空间</button>
+  <button id="btnTrash">数据急救</button>
+  <button id="btnMaint">维护</button>
+  <button id="btnPanel">备份与还原</button>
+</div>
+
+<nav class="tabs" id="tabs" aria-label="视图">
+  <button class="tab on" data-view="home">主页</button>
+  <button class="tab" data-view="sessions">会话整理</button>
+  <button class="tab" data-view="maint">维护 · 备份</button>
+</nav>
+
+<!-- ===== 主页 ===== -->
+<main id="viewHome" class="view on">
+  <div class="card" style="margin-bottom:14px;padding:16px 18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+    <div style="flex:1;min-width:240px">
+      <div style="font-size:15px;font-weight:600">一键整理</div>
+      <div class="note" style="margin:2px 0 0">把规则有把握的建议标题一次改完。没认出来的、正在用的会自动跳过；改前自动备份，随时可撤回。</div>
+    </div>
+    <button class="btn" id="btnOrganizeAll" style="min-width:120px">一键整理</button>
+  </div>
+
+  <div class="stats" id="homeStats"></div>
+
+  <div class="card homewarn" id="homeWarn"></div>
+
+  <div class="homecards">
+    <button class="hcard" id="hcSessions">
+      <span class="hic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-edit"/></svg></span>
+      <span><span class="ht">批量改名</span><span class="hd" style="display:block">规则建议 + AI 起名，勾选一次改完</span></span>
+      <span class="badge" id="badgeChange">—</span>
+    </button>
+    <button class="hcard" id="hcAi">
+      <span class="hic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-ai"/></svg></span>
+      <span><span class="ht">AI 起名</span><span class="hd" style="display:block">读对话摘要，比规则准</span></span>
+    </button>
+    <button class="hcard" id="hcTrash">
+      <span class="hic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-shield"/></svg></span>
+      <span><span class="ht">数据急救</span><span class="hd" style="display:block">误删的会话扫描救回</span></span>
+      <span class="badge" id="badgeTrash">—</span>
+    </button>
+    <button class="hcard" id="hcWs">
+      <span class="hic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-broom"/></svg></span>
+      <span><span class="ht">工作空间</span><span class="hd" style="display:block">磁盘放哪 + 闲置清理</span></span>
+    </button>
+    <button class="hcard" id="hcBackup">
+      <span class="hic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-backup"/></svg></span>
+      <span><span class="ht">备份与还原</span><span class="hd" style="display:block">改动前自动快照，可回退</span></span>
+      <span class="badge" id="badgeSnap">—</span>
+    </button>
+    <button class="hcard" id="hcHist">
+      <span class="hic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-history"/></svg></span>
+      <span><span class="ht">操作历史</span><span class="hd" style="display:block">每步可撤回，含文件搬移</span></span>
+    </button>
+  </div>
+
+  <div class="card homehist" style="margin-top:14px;padding:16px 18px">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <h3 style="font-size:15px;font-weight:600">最近动态</h3>
+      <button class="btn ghost" id="btnHomeAll" style="min-height:32px;font-size:13px;padding:4px 12px">看全部</button>
+    </div>
+    <div id="homeHist" style="margin-top:6px"></div>
+  </div>
+</main>
+
+<main id="viewSessions" class="view">
+  <div class="stats" id="stats"></div>
+
+  <div class="bar" id="filters"></div>
+
+  <p class="note" id="filterNote" hidden
+     style="margin:0 0 8px;background:var(--blue-bg);border-radius:var(--r8);
+            padding:10px 14px;line-height:1.7"></p>
+
+  <div class="bar" style="margin-top:-4px">
+    <input type="search" id="q" placeholder="搜标题或目录，回车不用按，边打边筛"
+           spellcheck="false"
+           style="flex:1;min-width:200px;height:38px;padding:0 14px;font-size:14px;
+                  border:1px solid var(--line);border-radius:var(--r8);
+                  background:var(--card);color:var(--ink);outline:none">
+    <select id="sortBy" spellcheck="false"
+            style="height:38px;padding:0 10px;font-size:13px;border:1px solid var(--line);
+                   border-radius:var(--r8);background:var(--card);color:var(--ink);outline:none">
+      <option value="time">按最近更新</option>
+      <option value="title">按标题</option>
+      <option value="dir">按目录</option>
+    </select>
+    <span class="sub" id="qhint" style="white-space:nowrap"></span>
+    <button class="btn ghost" id="btnOrganizeAll2" style="min-height:38px;font-size:13px">一键整理</button>
+  </div>
+
+  <div class="card allowsticky">
+    <div class="tblwrap">
+      <table>
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="pickAll" title="全选当前列表"></th>
+            <th>当前标题</th>
+            <th>建议标题</th>
+            <th>工作空间（点一下可单独迁移）</th>
+            <th>类型</th>
+            <th>依据</th>
+          </tr>
+        </thead>
+        <tbody id="tb"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" hidden>这个筛选下没有会话</div>
+  </div>
+</main>
+
+<!-- ===== 维护 · 备份 ===== -->
+<main id="viewMaint" class="view">
+  <div class="card" style="border-radius:var(--r14);padding:22px 24px 20px">
+      <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">路径写法分裂</h2>
+      <p class="note" id="pathNote">正在检查…</p>
+      <div id="pathOut"></div>
+      <div class="bar" style="margin-top:10px">
+        <button class="btn" id="btnUnify" disabled>统一写法</button>
+      </div>
+      <h3 class="sub-h">存储占用</h3>
+      <p class="note" id="storeNote">正在统计…</p>
+      <div class="bar" style="margin-top:10px">
+        <button class="btn ghost" id="btnClean">清理旧导出包</button>
+      </div>
+
+      <h3 class="sub-h">空间体检</h3>
+      <p class="note" id="spaceNote">正在统计…</p>
+      <div class="bar" style="margin-top:10px">
+        <button class="btn ghost" id="btnPurgeJunk" hidden>清理已删会话的残留文件</button>
+        <button class="btn ghost" id="btnMoveGuide">C 盘瘦身指引</button>
+      </div>
+      <p class="note" style="margin-top:10px">
+        想要独立 App 窗口（没有地址栏、像本地软件）：
+        用 Chrome 或 Edge 打开本页 → 地址栏右侧「安装」图标 →「安装为应用」。
+        以后从开始菜单/桌面启动，就是独立窗口。手机端没有 WorkBuddy 本地数据，不需要管。
+      </p>
+      <div id="moveGuide" hidden>
+        <p class="note">WorkBuddy 的数据目录（对话正文、缓存都在里面）默认在 C 盘用户目录，
+用久了会越来越大。想把整个数据目录搬到其他盘、且 WorkBuddy 一切照旧，做法是「搬走 + 目录联接」：</p>
+        <ol class="steps">
+          <li>完全退出 WorkBuddy（含右下角托盘）</li>
+          <li>把 <code>C:\Users\你的名字\.workbuddy</code> 整个文件夹剪切到其他盘，比如 <code>D:\wb-data</code></li>
+          <li>用<b>管理员身份</b>打开命令行，执行：<br>
+            <code>mklink /J "C:\Users\你的名字\.workbuddy" "D:\wb-data"</code></li>
+          <li>重新打开 WorkBuddy，一切照旧，C 盘只占一个链接的位置</li>
+        </ol>
+        <p class="note">联接对 WorkBuddy 完全透明，本工具搬家前后也都能正常找到数据库。
+        动手前先用「备份一次」留个底。</p>
+      </div>
+  </div>
+
+  <div class="card" style="border-radius:var(--r14);padding:22px 24px 20px;margin-top:14px">
+      <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">备份与还原</h2>
+      <p class="note" id="bnote" style="margin-bottom:10px"></p>
+      <div class="bar" style="margin-bottom:10px">
+        <button class="btn ghost" id="btnBackupsCleanup">一键清理旧备份（只留最近 20 份）</button>
+      </div>
+      <ul class="blist" id="blist"></ul>
+  </div>
+
+  <div class="card" style="border-radius:var(--r14);padding:22px 24px 20px;margin-top:14px">
+      <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">操作历史</h2>
+      <p class="note" style="margin-bottom:10px">
+        每次改名、移空间、归档都会记一条，并留下一份当时的快照。
+        改坏了点「撤回」，就退回那一步之前的样子。
+      </p>
+      <div id="histOut"></div>
+      <div class="bar" style="margin-top:10px">
+        <button class="btn ghost" id="btnHistReload">刷新历史</button>
+      </div>
+  </div>
+</main>
+
+  <div class="sheet" id="aiPanel">
+    <div class="card">
+      <button class="close" id="btnAiClose" aria-label="关闭">×</button>
+      <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">让 AI 读对话内容起名</h2>
+      <p class="note" style="margin-bottom:14px">
+        规则只看标题和目录，猜不出这次到底干了什么。AI 能读到你当时的原话，
+        命名准得多。整个过程不会改动任何会话。
+      </p>
+
+      <h3 class="sub-h">方式一：接 API，一键命名</h3>
+      <label class="lab" for="styleSel">命名风格（改完点下方「保存」，列表里的建议标题会跟着刷新）</label>
+      <select id="styleSel" class="ta" style="height:38px;padding:0 10px">
+        <option value="emoji">图标开头 —— 图标 + 主题（默认）</option>
+        <option value="plain">纯文字 —— 类型｜主题</option>
+        <option value="date">日期开头 —— 08-11 主题（适合按时间翻）</option>
+      </select>
+      <label class="lab">第一步：从内置模板挑一个（点一下就填好关键词，可再改）</label>
+      <div class="bar" id="typeTplBar" style="flex-wrap:wrap;gap:6px"></div>
+      <label class="lab" for="cfgTypes">第二步：自定义（一行一条：类型名=关键词,关键词…；名字前可带图标）</label>
+      <textarea id="cfgTypes" class="ta" rows="3" spellcheck="false"
+        placeholder="剪辑交付=出片,成片,交付&#10;🏷️ 客户对接=返修,审片"></textarea>
+      <div class="bar" id="typeChips" style="flex-wrap:wrap;gap:6px;margin-top:6px"></div>
+      <p class="note" style="margin-top:4px">自定的类型排在内置规则前面，先命中先算。留空就用内置的七类。</p>
+      <p class="note" id="cfgNote">正在读取配置…</p>
+      <div class="bar" style="margin-top:10px">
+        <button class="btn" id="btnNamingAuto" disabled>一键 AI 命名</button>
+        <button class="btn ghost" id="btnCfgToggle">API 设置</button>
+      </div>
+      <div id="cfgBox" hidden>
+        <label class="lab" for="cfgBase">接口地址</label>
+        <input class="ta" id="cfgBase" spellcheck="false" placeholder="https://api.deepseek.com/v1">
+        <label class="lab" for="cfgModel">模型名</label>
+        <input class="ta" id="cfgModel" spellcheck="false" placeholder="deepseek-chat">
+        <label class="lab" for="cfgKey">API Key（只存本机 config.json，不回显）</label>
+        <input class="ta" id="cfgKey" type="password" spellcheck="false" placeholder="sk-…">
+        <p class="note" style="margin-top:6px">
+          没有 Key？去 platform.deepseek.com 注册，在「API Keys」里创建一个。
+          一次整理 100 条会话大约 2 万 token，几分钱级别。用其他兼容 OpenAI 接口的服务商也行，改上面的接口地址即可。
+        </p>
+        <div class="bar" style="margin-top:10px">
+          <button class="btn" id="btnCfgSave">保存</button>
+          <button class="btn ghost" id="btnCfgClear">清掉 Key</button>
+        </div>
+      </div>
+
+      <h3 class="sub-h">方式二：手动导出 / 导入（不用 API 就走这条）</h3>
+      <ol class="steps" style="margin-top:10px">
+        <li>点下面的「导出命名请求」，会生成一个 json 文件，里面有每条会话的对话摘要。</li>
+        <li>新开一个 WorkBuddy 会话，把文件路径发给它，让它按文件里的 <code>ask</code> 字段返回结果。</li>
+        <li>把返回的 json 粘到下面「导入结果」里，再刷新，建议标题就换成了 AI 给的。</li>
+      </ol>
+      <div class="bar" style="margin-top:14px">
+        <button class="btn ghost" id="btnNamingExport">导出命名请求</button>
+        <button class="btn ghost" id="btnNamingClear">清掉 AI 结果</button>
+      </div>
+      <div id="namingOut" class="out" hidden></div>
+      <label class="lab" for="namingIn">导入结果（粘贴模型返回的 JSON）</label>
+      <textarea id="namingIn" class="ta" rows="5" spellcheck="false"
+        placeholder='{"titles":[{"id":"会话id","title":"🛠️ 主题｜动作"}]}'></textarea>
+      <div class="bar" style="margin-top:10px">
+        <button class="btn" id="btnNamingImport">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet sheet2" id="detailSheet">
+    <div class="card">
+      <div class="bar" style="justify-content:space-between;margin-bottom:14px">
+        <button class="btn ghost" id="btnDetailBack">← 返回</button>
+        <span class="sub" style="margin:0">会话详情</span>
+        <span style="width:70px"></span>
+      </div>
+      <div id="detailSheetBody"></div>
+    </div>
+  </div>
+
+  <div class="sheet sheet2" id="typeSheet">
+    <div class="card">
+      <div class="bar" style="justify-content:space-between;margin-bottom:12px">
+        <button class="btn ghost" id="btnTypeBack">← 返回</button>
+        <span style="font-weight:600" id="typeSheetTitle">给这条会话换个类型</span>
+        <span style="width:70px"></span>
+      </div>
+      <p class="note" style="margin:0 0 10px">
+        类型 = 标题开头那个图标 + 分类名。选一个，这条的建议标题就会换成对应前缀，
+        点确定直接写回 WorkBuddy（改前自动备份）。
+      </p>
+      <input type="search" id="typeSearch" spellcheck="false" placeholder="搜类型名或关键词，比如：翻译、健身、简历"
+        style="width:100%;height:38px;padding:0 14px;font-size:14px;margin-bottom:10px;
+               border:1px solid var(--line);border-radius:var(--r8);background:var(--card);color:var(--ink);outline:none">
+      <div id="typeList" style="max-height:40vh;overflow:auto"></div>
+      <div class="bar" style="margin-top:12px;flex-wrap:wrap">
+        <input id="typeNewName" spellcheck="false" placeholder="新类型名"
+          style="flex:1;min-width:120px;height:38px;padding:0 12px;font-size:13px;
+                 border:1px solid var(--line);border-radius:var(--r8);background:var(--card);color:var(--ink)">
+        <input id="typeNewKeys" spellcheck="false" placeholder="自动命中的关键词，逗号隔开"
+          style="flex:2;min-width:200px;height:38px;padding:0 12px;font-size:13px;
+                 border:1px solid var(--line);border-radius:var(--r8);background:var(--card);color:var(--ink)">
+        <button class="btn ghost" id="btnTypeAdd">保存为自定义类型</button>
+      </div>
+      <p class="note" style="margin-top:6px">自定义类型全局生效：以后标题里含这些关键词的会话都会自动归到这个类型。</p>
+    </div>
+  </div>
+
+  <div class="sheet" id="movePanel">
+    <div class="card wide">
+      <button class="close" id="btnMoveClose" aria-label="关闭">×</button>
+      <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">移动到工作空间</h2>
+      <p class="note" style="margin-bottom:14px">
+        WorkBuddy 侧栏里的「空间」就是按目录来的：把会话移到对应目录，侧栏就归到那个空间下面。先看清单再决定，
+        清单里标「跳过」的不会被处理。
+      </p>
+      <span class="lab" id="moveBulkLab">批量设为目标（也可以下面单条改）</span>
+      <input class="ta" id="moveTarget" list="dirList" spellcheck="false"
+        placeholder="手输一个新项目路径也行，不存在会自动建，或点下面任一目录">
+      <datalist id="dirList"></datalist>
+      <div class="bar" id="dirChips" style="margin-top:8px"></div>
+      <div class="bar" style="margin-top:12px">
+        <button class="btn ghost" id="btnMoveCheck">检查</button>
+        <button class="btn" id="btnMoveRun" disabled>确认搬运</button>
+        <span class="sub" id="moveSum"></span>
+      </div>
+      <div id="moveOut" hidden style="margin-top:16px"></div>
+    </div>
+  </div>
+
+  <div class="sheet" id="wsPanel">
+    <div class="card wide">
+      <button class="close" id="btnWsClose" aria-label="关闭">×</button>
+      <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">工作空间</h2>
+      <p class="note" style="margin-bottom:12px">
+        WorkBuddy 在默认位置开对话时，会按时间戳或任务名自动建文件夹，用久了攒一堆。
+        这里把它们列出来，只允许清「完全空的」——有记忆文件或有内容的只报告不动，
+        因为 <code>memory.md</code> 是那个空间里养出来的记忆，删了找不回来。
+      </p>
+
+      <h3 class="sub-h" style="margin-top:4px">散落的会话 · 一键整理</h3>
+      <p class="note" id="rehomeNote">正在检查…</p>
+      <div id="rehomeOut"></div>
+
+      <h3 class="sub-h">磁盘扫描 · 该把工作空间放哪</h3>
+      <div id="diskOut"></div>
+
+      <h3 class="sub-h">默认空间里的文件夹</h3>
+      <p class="note" id="wsNote">正在扫描…</p>
+      <div id="wsOut"></div>
+      <p class="note" style="margin-top:10px">
+        只有带「可清理」标签的空文件夹能勾选；灰掉的行是受保护的——
+        里面有记忆或文件，行尾写明了原因，勾选框不给点，这是防止误删记忆。
+        点「清理」后还会再弹一次确认，确认了才动手。
+      </p>
+      <div class="bar" style="margin-top:10px">
+        <button class="btn" id="btnWsClean">清理选中的空文件夹</button>
+        <button class="btn ghost" id="btnWsPickEmpty">全选可清理的</button>
+        <span class="sub" id="wsSel"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet" id="trashPanel">
+    <div class="card wide">
+      <button class="close" id="btnTrashClose" aria-label="关闭">×</button>
+      <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">数据急救</h2>
+      <p class="note" style="margin-bottom:12px">
+        这里只列「已删除」的会话，不碰任何还在用的。
+        WorkBuddy 删会话是打个删除标记，正文文件往往还在磁盘上，所以删完一段时间内能捞回来。
+        恢复只做两件事：去掉删除标记、把正文放回该在的位置，标题和内容一个字都不改。
+      </p>
+
+      <div id="trashSum" class="note">正在扫描…</div>
+
+      <div class="bar" style="margin-top:10px">
+        <button class="btn ghost" id="btnTrashPickOk">全选可恢复的</button>
+        <button class="btn ghost" id="btnTrashClearSel">清空选择</button>
+        <input id="trashTarget" spellcheck="false" placeholder="恢复到指定目录（留空就回原目录）"
+          style="flex:1;min-width:220px;height:38px;padding:0 12px;font-size:13px;
+                 border:1px solid var(--line);border-radius:var(--r8);
+                 background:var(--card);color:var(--ink)">
+      </div>
+
+      <div id="trashOut" style="max-height:46vh;overflow:auto;margin-top:8px"></div>
+
+      <div class="bar" style="margin-top:12px">
+        <button class="btn" id="btnTrashRestore">恢复选中的</button>
+        <span class="sub" id="trashSel"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footbar">
+  <span class="n">已选 <b id="nSel">0</b> 条</span>
+  <button class="btn ghost" id="btnPickAll">全选</button>
+  <button class="btn disabled" id="btnApply">应用改名</button>
+  <button class="btn ghost disabled" id="btnMoveSel">移到空间</button>
+  <button class="btn ghost disabled" id="btnArchive">归档</button>
+  <button class="btn ghost" id="btnDeselect">取消选择</button>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="errbar" id="errbar"></div>
+
+<script>
+let STATE = { stats:{}, items:[] };
+let VIEW = [];
+let SEL = new Set();
+let FILTER = 'change';
+let Q = '';
+let SORT = 'time';
+// 与后端 MAX_BACKUPS 保持一致：快照最多自动留 20 份
+const MAX_SNAP = 20;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function toast(msg, ms){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(t._t);
+  t._t = setTimeout(()=>t.classList.remove('on'), ms || 2600);
+}
+
+/* 确认框：不用原生 confirm。
+   WorkBuddy 的内置浏览器会静默拦掉原生弹窗，confirm 直接返回 false，
+   看起来就是"点了按钮什么都没发生"。所以自己画一个。 */
+function ask(msg, okText){
+  return new Promise(resolve=>{
+    const mask = document.createElement('div');
+    mask.className = 'askmask';
+    const box = document.createElement('div');
+    box.className = 'askbox';
+    const p = document.createElement('p');
+    p.className = 'asktext';
+    p.textContent = msg;
+    const bar = document.createElement('div');
+    bar.className = 'askbar';
+    const no = document.createElement('button');
+    no.className = 'btn ghost';
+    no.textContent = '取消';
+    const yes = document.createElement('button');
+    yes.className = 'btn';
+    yes.textContent = okText || '确定';
+    bar.append(no, yes);
+    box.append(p, bar);
+    mask.appendChild(box);
+    document.body.appendChild(mask);
+    requestAnimationFrame(()=>mask.classList.add('on'));
+
+    let closed = false;
+    const done = v => {
+      if(closed) return;
+      closed = true;
+      mask.classList.remove('on');
+      document.removeEventListener('keydown', onKey);
+      setTimeout(()=>mask.remove(), 200);
+      resolve(v);
+    };
+    const onKey = e => {
+      if(e.key === 'Escape') done(false);
+      if(e.key === 'Enter') done(true);
+    };
+    no.onclick = ()=>done(false);
+    yes.onclick = ()=>done(true);
+    mask.onclick = e => { if(e.target === mask) done(false); };
+    document.addEventListener('keydown', onKey);
+    yes.focus();
+  });
+}
+
+/* 出错就显示出来，别让页面静悄悄地失败 */
+function reportErr(msg){
+  // ResizeObserver loop 是浏览器的良性时序通知（布局链式反馈），不影响功能，不吓用户
+  if (/ResizeObserver loop/i.test(msg || '')) return;
+  const b = $('errbar');
+  if(!b) return;
+  b.textContent = '操作出错了：' + msg + '\n如果反复出现，把这句话记下来告诉开发者。';
+  b.classList.add('on');
+  clearTimeout(b._t);
+  b._t = setTimeout(()=>b.classList.remove('on'), 9000);
+}
+window.addEventListener('error', e => reportErr(e.message || String(e.error || '未知脚本错误')));
+window.addEventListener('unhandledrejection', e => {
+  const r = e.reason;
+  reportErr((r && (r.message || r)) || '请求没有完成');
+});
+
+async function api(path, body){
+  const opt = body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  const d = await r.json();
+  if (!r.ok || d.error) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+
+/* ---------- 渲染 ---------- */
+
+function renderStats(){
+  const s = STATE.stats;
+  const cards = [
+    ['会话总数', s.total, ''],
+    ['定时任务', s.auto, '每天刷一条'],
+    ['待改标题', s.need_change, '格式不合规'],
+    ['重名冗余', s.dup_extra ?? 0, (s.dup_groups||0) + ' 组同名'],
+    ['目录分组', s.groups, s.conflict ? (s.conflict+' 条待确认') : ''],
+  ];
+  const html = cards.map(([k,v,d])=>
+    `<div class="stat"><div class="k">${esc(k)}</div>
+     <div class="v">${esc(v)}</div>
+     <div class="d">${esc(d)}</div></div>`).join('');
+  $('stats').innerHTML = html;
+  const hs = $('homeStats');
+  if (hs) hs.innerHTML = html;
+}
+
+function renderFilters(){
+  const s = STATE.stats || {};
+  const renamed = (STATE.items || []).filter(x=>x.has_custom).length;
+  const fs = [
+    ['change','待改 ('+(s.need_change||0)+')'],
+    ['conflict','需确认 ('+(s.conflict||0)+')'],
+    ['renamed','已改名 ('+renamed+')'],
+    ['all','全部 ('+(s.total||0)+')'],
+    ['auto','定时 ('+(s.auto||0)+')'],
+    ['manual','手动 ('+(s.manual||0)+')'],
+    ['archived','已归档 ('+(s.archived||0)+')'],
+  ];
+  $('filters').innerHTML = fs.map(([k,label])=>
+    `<button class="chip" data-f="${k}" aria-pressed="${FILTER===k}">${esc(label)}</button>`).join('');
+  $('filters').querySelectorAll('.chip').forEach(b=>{
+    b.onclick = ()=>{ FILTER = b.dataset.f; SEL.clear(); renderFilters(); renderTable(); updateBar(); };
+  });
+  renderFilterNote();
+}
+
+/* 筛选说明：把「这是什么、该怎么处理」用大白话讲清楚 */
+function renderFilterNote(){
+  const n = $('filterNote');
+  if (!n) return;
+  if (FILTER === 'conflict'){
+    n.hidden = false;
+    n.innerHTML = `<b>这些会话，工具没认出是干什么的</b>——标题和目录都看不出主题，所以不乱猜。
+      就在这里处理，两种都行：① 在「建议标题」框里自己起个名（或点右上角「AI 起名」让 AI 读内容起）；
+      ② 勾选后点底部「移到空间」，把它挪到该在的空间里。不改也完全没影响。`;
+  }else if (FILTER === 'auto'){
+    n.hidden = false;
+    n.innerHTML = `<b>定时任务对话</b>：每天自动生成一条，所以越攒越多。
+      可以照常勾选改名；旧的就归档吧，侧栏能清净不少。归档后在 WorkBuddy 的「设置 → 归档的任务」里能找到。
+      <button class="btn ghost" id="btnArchiveOldAuto"
+        style="min-height:30px;font-size:12px;padding:3px 12px;margin-left:8px">归档 30 天前的定时对话</button>`;
+    const b = $('btnArchiveOldAuto');
+    if (b) b.onclick = archiveOldAuto;
+  }else if (FILTER === 'archived'){
+    n.hidden = false;
+    n.innerHTML = `<b>已归档的会话</b>：从侧栏收起来了，数据都在。
+      在 WorkBuddy 里这叫「归档的任务」，在 <b>设置</b> 页能找到。
+      这里勾选后点底部「取消归档」，就能放回侧栏。`;
+  }else{
+    n.hidden = true;
+  }
+}
+
+/* 归档 30 天前的定时任务对话：给侧栏腾地方，数据完整保留 */
+async function archiveOldAuto(){
+  const cut = Date.now() - 30 * 24 * 3600 * 1000;
+  const ids = (STATE.items || [])
+    .filter(x=>x.auto && !x.archived && !x.active && (x.updated_at || 0) < cut)
+    .map(x=>x.id);
+  if (!ids.length){ toast('没有 30 天前的定时对话，都很新'); return; }
+  if (!await ask(`归档 ${ids.length} 条 30 天前的定时任务对话？\n\n` +
+      `归档后从侧栏隐藏，数据完整保留，随时能取消归档放回侧栏。\n在 WorkBuddy 里这叫「归档的任务」，在 设置 页能找到。\n` +
+      `WorkBuddy 的自动清理会跳过归档的会话，所以归档反而更安全。`, `归档 ${ids.length} 条`)) return;
+  try{
+    const r = await api('/api/archive', {ids, archive: true});
+    if (r.error){ toast(r.error); return; }
+    toast(`已归档 ${r.changed} 条，重启 WorkBuddy 后生效`);
+    await load();
+  }catch(e){ toast('失败：'+e.message); }
+}
+
+function filtered(){
+  const it = keyword(STATE.items);
+  // 归档的不参与日常整理，只有「全部」和「已归档」能看到它们
+  let arr;
+  if (FILTER==='archived') arr = it.filter(x=>x.archived);
+  else if (FILTER==='all') arr = it;
+  else if (FILTER==='renamed') arr = it.filter(x=>x.has_custom && !x.archived);
+  else if (FILTER==='change') arr = it.filter(x=>x.changed && !x.archived);
+  else if (FILTER==='auto') arr = it.filter(x=>x.auto && !x.archived);
+  else if (FILTER==='manual') arr = it.filter(x=>!x.auto && !x.archived);
+  else if (FILTER==='conflict') arr = it.filter(x=>x.conflict && !x.archived);
+  else arr = it.filter(x=>!x.archived);
+  if (SORT === 'title') arr = [...arr].sort((a,b)=>a.current.localeCompare(b.current,'zh-CN'));
+  else if (SORT === 'dir') arr = [...arr].sort((a,b)=>
+    (a.dir||'').localeCompare(b.dir||'','zh-CN') || (b.updated_at||0)-(a.updated_at||0));
+  return arr;
+}
+
+/* 关键字筛：标题、建议名、目录名、判断依据，四个字段任一命中就算 */
+function keyword(arr){
+  const q = Q.trim().toLowerCase();
+  if(!q) return arr;
+  return arr.filter(x=>
+    (x.current||'').toLowerCase().includes(q) ||
+    (x.suggest||'').toLowerCase().includes(q) ||
+    (x.dir||'').toLowerCase().includes(q) ||
+    (x.why||'').toLowerCase().includes(q)
+  );
+}
+
+function renderTable(){
+  VIEW = filtered();
+  const tb = $('tb');
+  $('empty').hidden = VIEW.length > 0;
+  const hint = $('qhint');
+  if(hint){
+    hint.textContent = Q.trim() ? `命中 ${VIEW.length} 条` : '';
+  }
+  tb.innerHTML = VIEW.map((x,i)=>{
+    const live = x.active
+      ? `<span class="tag live">${x.active==='running'?'进行中':'刚写过'}</span> `
+      : '';
+    const state = x.archived ? '<span class="tag bad">已归档</span>'
+      : (x.auto ? '<span class="tag blue">定时</span>'
+      : (x.conflict ? '<span class="tag warn">需确认</span>'
+      : (x.changed ? '<span class="tag blue">待改</span>' : '<span class="tag">已合规</span>')));
+    // 自己起过名、且和当前一致：不再重复摆一个输入框，免得两列一模一样。
+    // 「需确认」的行必须保留输入框——那是用户就地改名的地方，不能吞
+    const sugCell = (x.has_custom && x.suggest === x.current && !x.conflict)
+      ? `<td class="sug"><span class="same">已是这个名字</span></td>`
+      : `<td class="sug"><input type="text" data-i="${i}" value="${esc(x.suggest)}" spellcheck="false"></td>`;
+    return `<tr data-id="${esc(x.id)}"${x.archived?' class="isarch"':''}${x.active?' data-live="1"':''}>
+      <td class="pick"><input type="checkbox" data-i="${i}" ${SEL.has(x.id)?'checked':''}></td>
+      <td class="cur">${state}<span title="${esc(x.current)}">${esc(x.current)}</span></td>
+      ${sugCell}
+      <td class="dir" title="${esc(x.cwd)}（点击可单独移到别的工作空间）"
+        style="cursor:pointer;text-decoration:underline dotted var(--ink3);text-underline-offset:3px"
+        data-moveone="${i}">${esc(x.dir)}</td>
+      <td><span class="tag" ${x.auto ? `title="定时任务的格式是固定的，不换类型"` : `data-tpick="${i}" title="点击换类型" style="cursor:pointer"`}>${esc(x.emoji)} ${esc(x.type)}</span></td>
+      <td class="dir" title="${esc(x.why)}">${live}${esc(x.why)}</td>
+    </tr>`;
+  }).join('');
+
+  tb.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.onchange = ()=>{
+      const item = VIEW[+cb.dataset.i];
+      cb.checked ? SEL.add(item.id) : SEL.delete(item.id);
+      updateBar();
+    };
+  });
+  tb.querySelectorAll('input[type=text]').forEach(inp=>{
+    inp.oninput = ()=>{ VIEW[+inp.dataset.i].suggest = inp.value; };
+  });
+  // 行内单独迁移：点「工作空间」格 = 只带这一条打开移空间面板
+  tb.querySelectorAll('[data-moveone]').forEach(td=>{
+    td.onclick = ()=>{
+      const x = VIEW[+td.dataset.moveone];
+      if (!x || x.active) { if(x && x.active) toast('正在使用的会话不能移，等它闲下来'); return; }
+      openMovePanel([{ id: x.id, title: x.current, from: x.cwd, to: '',
+                       active: false, status: '', why: '', size_h: '' }]);
+    };
+  });
+  // 类型可换：点类型 tag 打开类型选择器（定时任务是固定格式，不给点）
+  tb.querySelectorAll('[data-tpick]').forEach(el=>{
+    el.onclick = ()=>openTypePicker(+el.dataset.tpick);
+  });
+  fitTable();
+}
+
+/* 表头贴视口走，不再限制表格高度。
+   这里只负责清掉旧版本可能残留在内联样式里的 max-height。 */
+function fitTable(){
+  const tw = document.querySelector('.tblwrap');
+  if(tw) tw.style.maxHeight = '';
+  const fb = document.querySelector('.footbar');
+  // 底栏是 fixed，页面底部要留出它的高度，否则最后一行被压住点不到。
+  // 手机上按钮多会换成两行，高度随时变，所以用 ResizeObserver 盯着它自己重算
+  if(fb){
+    document.body.style.paddingBottom = (fb.offsetHeight + 24) + 'px';
+    if (!fitTable._ro){
+      fitTable._ro = new ResizeObserver(()=>fitTable());
+      fitTable._ro.observe(fb);
+    }
+  }
+}
+window.addEventListener('resize', ()=>{ clearTimeout(window._fitT); window._fitT = setTimeout(fitTable, 120); });
+
+function updateBar(){
+  // 有搜索时，只对看得见的行生效，所以分开显示「可见选中/总选中」
+  const visSel = VIEW.filter(x=>SEL.has(x.id)).length;
+  $('nSel').textContent = Q.trim() ? `${visSel}/${SEL.size}` : SEL.size;
+  const none = SEL.size === 0;
+  $('btnApply').classList.toggle('disabled', none);
+  $('btnMoveSel').classList.toggle('disabled', none);
+  $('btnArchive').classList.toggle('disabled', none);
+  const picked = STATE.items.filter(x=>SEL.has(x.id));
+  const allArch = picked.length > 0 && picked.every(x=>x.archived);
+  $('btnArchive').textContent = allArch ? '取消归档' : '归档';
+  const all = VIEW.length > 0 && VIEW.every(x=>SEL.has(x.id));
+  $('pickAll').checked = all;
+  // 底部全选入口：窄屏表头会消失，这里是唯一稳定的全选位置
+  const pa = $('btnPickAll');
+  pa.textContent = all ? `取消全选（${VIEW.length}）` : `全选（${VIEW.length}）`;
+  pa.classList.toggle('disabled', VIEW.length === 0);
+}
+
+/* 没勾选就点按钮时，给一句人话，而不是让按钮默默不动 */
+function needPick(){
+  if(SEL.size === 0){
+    toast('先在左边勾选要处理的会话');
+    return true;
+  }
+  return false;
+}
+
+/* ---------- 动作 ---------- */
+
+async function load(){
+  const d = await api('/api/state');
+  STATE = d;
+  $('dbpath').textContent = '数据库 ' + d.db + (d.db_exists ? '' : '（不存在）');
+  // 非 Windows 平台：目录转义规则没验证过，碰路径的功能一律停用
+  const warn = $('platwarn');
+  if(warn){
+    if(d.platform_ok === false){
+      warn.hidden = false;
+      warn.textContent = '本工具仅支持 Windows。当前系统（' + d.platform + '）不受支持：'
+        + '目录推算规则只确认过 Windows，移动空间和路径统一已停用，避免算错目录导致会话打不开。'
+        + '其余功能未验证，不承诺可用。';
+      $('btnMoveSel').classList.add('disabled');
+      $('btnMoveSel').title = '当前系统不支持';
+    }else{
+      warn.hidden = true;
+    }
+  }
+  renderStats(); renderFilters(); renderTable(); updateBar(); renderBackups(d.backups);
+  renderHome();
+}
+
+/* 快照标签翻译成人话：before-apply 是「改名前留的档」 */
+const TAG_CN = {
+  'manual': '手动备份',
+  'before-apply': '改名前',
+  'before-move': '移空间前',
+  'before-archive': '归档前',
+  'before-unarchive': '取消归档前',
+  'before-unify': '统一路径前',
+  'before-restore': '还原前',
+  'before-rehome': '整理散落会话前',
+  'before-organize': '一键整理前',
+};
+function renderBackups(list){
+  const n = (list||[]).length;
+  // 快照超过保留数就亮出一键清理
+  const bc = $('btnBackupsCleanup');
+  if (bc) bc.hidden = n <= MAX_SNAP;
+  const kb = (list||[]).reduce((s,b)=>s+(b.size||0),0)/1024;
+  $('bnote').innerHTML = n
+    ? `下面每一行都是一个「存档点」：你每次改名、移空间、归档之前，工具都会自动把当时的全部标题和目录存一份。
+       哪一步改坏了，就找那次操作<b>之前</b>的时间点，点「还原到这时」退回去。删掉某份存档只是那一步退不了了，不影响会话本身。<br>
+       现有 <b>${n}</b> 份 · 共 ${kb.toFixed(0)} KB · 最多自动保留 ${MAX_SNAP} 份，超出清掉最旧的，不会越滚越大。`
+    : '还没有存档。你做第一次改动之前，这里就会自动出现一份。';
+  $('blist').innerHTML = (list||[]).map(b=>
+    `<li><div><div>${esc(b.at)}</div>
+      <div class="meta">${esc(TAG_CN[b.tag] || b.tag)} · 当时共 ${esc(b.count)} 条会话 · ${(b.size/1024).toFixed(0)} KB</div></div>
+      <span style="display:flex;gap:8px;flex:none">
+        <button class="btn ghost" data-del="${esc(b.name)}">删</button>
+        <button class="btn ghost" data-restore="${esc(b.name)}">还原到这时</button>
+      </span></li>`).join('')
+    || '<li><div class="meta">还没有备份</div></li>';
+  $('blist').querySelectorAll('[data-restore]').forEach(b=>{
+    b.onclick = async ()=>{
+      if (!await ask('把这个快照里的标题和目录写回去？\n当前状态会先自动备份。')) return;
+      b.disabled = true;
+      try{
+        const r = await api('/api/restore', {name: b.dataset.restore});
+        toast(`已还原 ${r.changed} 条，重启 WorkBuddy 后生效`);
+        await load();
+      }catch(e){ toast('还原失败：'+e.message); b.disabled = false; }
+    };
+  });
+  $('blist').querySelectorAll('[data-del]').forEach(b=>{
+    b.onclick = async ()=>{
+      if (!await ask('删掉这份快照？\n删了只是这一步撤不回了，不影响会话数据本身。', '删')) return;
+      try{
+        const r = await api('/api/backups/delete', {name: b.dataset.del});
+        if(r.error){ toast(r.error); return; }
+        toast(`已删，剩 ${r.left} 份`);
+        await load();
+      }catch(e){ toast('删除失败：'+e.message); }
+    };
+  });
+}
+
+$('pickAll').onchange = ()=>{
+  if ($('pickAll').checked) VIEW.forEach(x=>SEL.add(x.id));
+  else VIEW.forEach(x=>SEL.delete(x.id));
+  renderTable(); updateBar();
+};
+
+// 底部全选：窄屏时表头被隐藏，这里是一直点得到的入口
+$('btnPickAll').onclick = ()=>{
+  if (VIEW.length === 0) return;
+  const all = VIEW.every(x=>SEL.has(x.id));
+  if (all) VIEW.forEach(x=>SEL.delete(x.id));
+  else VIEW.forEach(x=>SEL.add(x.id));
+  renderTable(); updateBar();
+};
+
+// 搜索：边打边筛，不用回车
+$('q').addEventListener('input', e=>{
+  Q = e.target.value || '';
+  renderTable(); updateBar();
+});
+
+// 排序：最近更新 / 标题 / 目录
+$('sortBy').onchange = e=>{
+  SORT = e.target.value;
+  renderTable(); updateBar();
+};
+
+/* 一键整理：规则有把握的一次改完 */
+// 表格页里也放一个一键整理入口，转调主页那个，逻辑只有一份
+$('btnOrganizeAll2').onclick = ()=>$('btnOrganizeAll').click();
+
+$('btnOrganizeAll').onclick = async ()=>{
+  const b = $('btnOrganizeAll');
+  // 第一步：预检（只算不改），把「改什么、跳过什么」摆在明面上
+  b.disabled = true; b.textContent = '检查中…';
+  let pre;
+  try{
+    pre = await api('/api/organize_all', {dry_run: true});
+  }catch(e){ toast('检查失败：'+e.message); b.disabled = false; b.textContent = '一键整理'; return; }
+  b.disabled = false; b.textContent = '一键整理';
+
+  const list = (pre.pairs || []).slice(0, 12).map(p =>
+    `  ${p.current} → ${p.suggest}`).join('\n');
+  const more = (pre.pairs || []).length > 12 ? `\n  …还有 ${pre.pairs.length - 12} 条` : '';
+  const skipped = [
+    pre.skipped_confirm ? `${pre.skipped_confirm} 条没认出来（留给你在「需确认」里定）` : '',
+    pre.skipped_active ? `${pre.skipped_active} 条正在使用（跳过）` : '',
+    pre.skipped_archived ? `${pre.skipped_archived} 条已归档（不动）` : '',
+  ].filter(Boolean).join('，');
+  const summary = `检查完成，这次会做两件事：\n\n` +
+    `1. 自动备份当前状态（改坏可撤回）\n` +
+    `2. 改 ${ (pre.pairs||[]).length } 条有把握的标题：\n${list}${more}\n\n` +
+    (skipped ? `自动跳过：${skipped}。\n` : '没有需要跳过的。\n') +
+    `\n确认开始吗？`;
+  if (!await ask(summary, `开始整理（${(pre.pairs||[]).length} 条）`)) return;
+
+  b.disabled = true; b.textContent = '整理中…';
+  try{
+    const r = await api('/api/organize_all', {});
+    await load();
+    if (!r.changed) toast('没有需要自动改的标题');
+    else toast(`已改 ${r.changed} 条，重启 WorkBuddy 后生效` +
+      (r.skipped_confirm ? `；还有 ${r.skipped_confirm} 条没认出来的，筛「需确认」自己定` : ''), 5000);
+  }catch(e){ toast('失败：'+e.message); }
+  b.disabled = false; b.textContent = '一键整理';
+};
+
+// 一键把快照清到保留数以内，删不掉的逐份讲原因，不再一个一个点
+$('btnBackupsCleanup').onclick = async ()=>{
+  const n = (STATE.backups || []).length;
+  if (!await ask(`把快照清到最近 ${MAX_SNAP} 份？\n\n` +
+      `会删掉最旧的 ${n - MAX_SNAP} 份，每一份删之前都会先尝试，` +
+      `删不掉的（文件被占用等）会列出来讲原因，不会卡住。\n` +
+      `删快照只影响「那一步撤不回了」，不动会话数据。`, `清理旧备份`)) return;
+  const b = $('btnBackupsCleanup');
+  b.disabled = true;
+  try{
+    const r = await api('/api/backups/cleanup', {keep: MAX_SNAP});
+    if (r.error){ toast(r.error); return; }
+    toast(`清掉 ${r.deleted} 份，剩 ${r.left} 份`);
+    if (r.failed && r.failed.length){
+      const why = r.failed.map(f=>`${f.name.slice(0,28)}…：${f.why}`).join('\n');
+      ask(`有 ${r.failed.length} 份没删掉：\n\n${why}\n\n` +
+          `多半是被别的程序占用，稍后再点一次就行。`, '知道了');
+    }
+    await load();
+  }catch(e){ toast('清理失败：'+e.message); }
+  b.disabled = false;
+};
+
+$('btnDeselect').onclick = ()=>{ SEL.clear(); renderTable(); updateBar(); };
+
+$('btnApply').onclick = async ()=>{
+  if(needPick()) return;
+  const pairs = VIEW.filter(x=>SEL.has(x.id)).map(x=>({id:x.id, title:x.suggest.trim()}));
+  if (!pairs.length) return;
+  if (!await ask(`改这 ${pairs.length} 条会话的标题？\n改之前会自动备份。`, '改这 ' + pairs.length + ' 条')) return;
+  $('btnApply').classList.add('disabled');
+  try{
+    const r = await api('/api/apply', {pairs});
+    toast(`改成 ${r.changed} 条，重启 WorkBuddy 后生效`);
+    SEL.clear();
+    await load();
+  }catch(e){ toast('失败：'+e.message); $('btnApply').classList.remove('disabled'); }
+};
+
+$('btnBackup').onclick = async ()=>{
+  try{
+    const r = await api('/api/backup', {});
+    await load();
+    // 备份完切到「维护 · 备份」视图，让用户看到现在有几份、占多少
+    showView('maint');
+    await loadHistory();
+    toast('已备份 1 份，可还原或删除，见「备份与还原」');
+  }
+  catch(e){ toast('失败：'+e.message); }
+};
+
+$('btnReload').onclick = ()=>load().then(()=>toast('已刷新'));
+$('btnPanel').onclick = ()=>{ showView('maint'); loadHistory(); };
+
+/* ---------- AI 命名 ---------- */
+// 支持 ?ai=1 直达，方便收藏和分享
+if(new URLSearchParams(location.search).get('ai') === '1'){
+  $('aiPanel').classList.add('on');
+}
+$('btnAi').onclick = ()=>{
+  $('aiPanel').classList.add('on');
+  loadConfig();
+};
+// 所有浮层共用的关闭逻辑
+function closeSheet(id){ const el = $(id); if (el) el.classList.remove('on'); }
+function openSheet(id){ const el = $(id); if (el) el.classList.add('on'); }
+$('btnDetailBack').onclick = ()=>closeSheet('detailSheet');
+
+/* ---------- 类型选择器：搜索 + 勾选 + 就地加自定义类型 ---------- */
+const EMOJI_HEAD = /^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}][\uFE0F]?\s*/u;
+let TYPE_CACHE = null;        // [{emoji,name,keys}]
+let TYPE_PICK_ID = null;      // 正在给哪条会话换类型
+
+async function getTypes(){
+  if (!TYPE_CACHE){
+    try{ TYPE_CACHE = (await api('/api/types')).types || []; }
+    catch(e){ TYPE_CACHE = []; }
+  }
+  try{
+    const c = await api('/api/config');
+    (c.custom_types || []).forEach(it=>{
+      if (!TYPE_CACHE.some(t=>t.name === it.name))
+        TYPE_CACHE.unshift({emoji: it.emoji, name: it.name, keys: it.keys, custom: true});
+    });
+  }catch(e){}
+  return TYPE_CACHE;
+}
+
+async function openTypePicker(i){
+  const x = VIEW[i];
+  if (!x) return;
+  TYPE_PICK_ID = x.id;
+  $('typeSheetTitle').textContent = `给「${x.current.slice(0, 24)}」换个类型`;
+  openSheet('typeSheet');
+  $('typeSearch').value = '';
+  await renderTypeList('');
+}
+
+async function renderTypeList(q){
+  const types = await getTypes();
+  const cur = (VIEW.find(v=>v.id === TYPE_PICK_ID) || {});
+  const low = (q || '').trim().toLowerCase();
+  const hit = types.filter(t=>!low
+    || t.name.toLowerCase().includes(low)
+    || (t.keys || []).some(k=>k.toLowerCase().includes(low)));
+  const rows = hit.map(t=>{
+    const on = cur.emoji === t.emoji && cur.type === t.name;
+    return `<div class="histrow" data-tp="${esc(t.emoji)}|${esc(t.name)}"
+        style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 12px">
+      <span style="font-size:16px;flex:none">${t.emoji}</span>
+      <span style="font-weight:${on?'600':'400'};flex:none">${esc(t.name)}</span>
+      <span class="sub" style="flex:1;overflow:hidden;text-overflow:ellipsis;
+        white-space:nowrap;margin:0">命中词：${esc((t.keys||[]).slice(0,8).join('、') || '（自定义，无关键词）')}${t.custom?' · 自定义':''}</span>
+      ${on ? '<span style="color:var(--blue);flex:none">✓ 当前</span>' : ''}
+    </div>`;
+  }).join('');
+  $('typeList').innerHTML = rows || '<p class="note">没有匹配的类型，可以下面自己加一个</p>';
+  $('typeList').querySelectorAll('[data-tp]').forEach(el=>{
+    el.onclick = ()=>pickType(el.dataset.tp);
+  });
+}
+
+async function pickType(tp){
+  const [emoji] = tp.split('|');
+  const x = VIEW.find(v=>v.id === TYPE_PICK_ID);
+  if (!x) return;
+  const body = (x.suggest || x.current).replace(EMOJI_HEAD, '').trim() || x.current;
+  const newTitle = `${emoji} ${body}`;
+  if (!await ask(`把这条的标题换成：\n\n  ${newTitle}\n\n` +
+      `改之前会自动备份，重启 WorkBuddy 后生效。`, '换成这个类型')) return;
+  try{
+    const r = await api('/api/apply', {pairs: [{id: x.id, title: newTitle}]});
+    if (r.error){ toast(r.error); return; }
+    toast(`已换类型并改名，重启 WorkBuddy 后生效`);
+    closeSheet('typeSheet');
+    await load();
+  }catch(e){ toast('失败：'+e.message); }
+}
+
+$('btnTypeBack').onclick = ()=>closeSheet('typeSheet');
+$('typeSheet').onclick = e => { if (e.target.id === 'typeSheet') closeSheet('typeSheet'); };
+$('typeSearch').oninput = ()=>renderTypeList($('typeSearch').value);
+$('btnTypeAdd').onclick = async ()=>{
+  const name = $('typeNewName').value.trim();
+  const keys = $('typeNewKeys').value.split(/[,，]/).map(k=>k.trim()).filter(Boolean);
+  if (!name || !keys.length){ toast('类型名和至少一个关键词都要填'); return; }
+  try{
+    const c = await api('/api/config');
+    const ct = (c.custom_types || []).filter(it=>it.name !== name);
+    ct.push({emoji: '🏷️', name, keys});
+    await api('/api/config', {custom_types: ct});
+    TYPE_CACHE = null;   // 下次打开重新拉
+    $('typeNewName').value = ''; $('typeNewKeys').value = '';
+    toast(`已保存自定义类型「${name}」，全局生效`);
+    await renderTypeList($('typeSearch').value);
+  }catch(e){ toast('保存失败：'+e.message); }
+};
+// 详情层点背景也回上一层（而不是整个关掉），Esc 同理
+$('detailSheet').onclick = e => { if (e.target.id === 'detailSheet') closeSheet('detailSheet'); };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('detailSheet').classList.contains('on')) closeSheet('detailSheet');
+});
+['aiPanel','movePanel','maintPanel','trashPanel','wsPanel'].forEach(id=>{
+  const el = $(id);
+  if (el) el.onclick = (e)=>{ if(e.target.id === id) closeSheet(id); };
+});
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Escape'){
+    ['aiPanel','movePanel','maintPanel','trashPanel','wsPanel'].forEach(closeSheet);
+  }
+});
+$('btnAiClose').onclick = ()=>closeSheet('aiPanel');
+
+/* ---------- API 配置与一键命名 ---------- */
+async function loadConfig(){
+  try{
+    const c = await api('/api/config');
+    $('cfgBase').value = c.base_url || '';
+    $('cfgModel').value = c.model || '';
+    $('styleSel').value = c.style || 'emoji';
+    // 自定义类型回填成一行一条的文本，方便直接改
+    const ct = (c.custom_types || []).map(it =>
+      (it.emoji && it.emoji !== '🏷️' ? it.emoji + ' ' : '') + it.name + '=' + (it.keys || []).join(','));
+    $('cfgTypes').value = ct.join('\n');
+    renderTypeChips();
+    if(c.has_key){
+      $('cfgNote').innerHTML = `已配置：<b>${esc(c.model)}</b>，密钥 ${esc(c.key_mask)}。
+        一次命名约 33 条，预计消耗 6–9 千 token。`;
+      $('btnNamingAuto').disabled = false;
+    }else{
+      $('cfgNote').innerHTML = '还没配置 API。没配置也能用，走下面的方式二。';
+      $('btnNamingAuto').disabled = true;
+    }
+  }catch(e){ $('cfgNote').textContent = '读取配置失败：'+e.message; }
+}
+
+$('btnCfgToggle').onclick = ()=>{ $('cfgBox').hidden = !$('cfgBox').hidden; };
+
+/* ---------- 自定义类型：模板 + 已加 chips ---------- */
+const TYPE_TPLS = [
+  {emoji:'🐛', name:'排查', keys:['报错','调试','异常','黑屏','卡顿','闪退','崩溃','故障']},
+  {emoji:'🗂️', name:'整理', keys:['整理','清理','归档','迁移','盘点','备份','收纳','恢复']},
+  {emoji:'🎬', name:'制作', keys:['剪辑','出片','素材','镜头','调色','成片','混剪','字幕','配音']},
+  {emoji:'📝', name:'文案', keys:['文案','选题','口播','爆款','笔记','简介','描述']},
+  {emoji:'💰', name:'事务', keys:['报销','发票','税务','社保','记账','账单','工资','合同','退款']},
+  {emoji:'🛠️', name:'开发', keys:['开发','编程','代码','脚本','插件','接口','api','数据库','部署','调试']},
+  {emoji:'🔍', name:'调研', keys:['调研','资料','查证','科普','背景','原理','行业','市场']},
+];
+function renderTypeChips(){
+  // 已加的自定义类型：一个 chip 一条，点 × 删那一行
+  const box = $('typeChips');
+  if (!box) return;
+  const lines = $('cfgTypes').value.split('\n').map(l=>l.trim()).filter(Boolean);
+  box.innerHTML = lines.length
+    ? lines.map((l,i)=>`<span class="chip" style="min-height:32px;padding:5px 10px;cursor:default">${esc(l.split('=')[0])}
+        <button data-del="${i}" style="border:0;background:none;cursor:pointer;
+          color:var(--ink3);font-size:14px;padding:0 0 0 4px" title="删掉这条">×</button></span>`).join('')
+    : '<span class="sub" style="margin:0">还没加自定义类型，可以用上面的模板，或直接在下面手写</span>';
+  box.querySelectorAll('[data-del]').forEach(b=>{
+    b.onclick = ()=>{
+      const ls = $('cfgTypes').value.split('\n');
+      ls.splice(+b.dataset.del, 1);
+      $('cfgTypes').value = ls.join('\n');
+      renderTypeChips();
+    };
+  });
+}
+(function initTypeTpls(){
+  const bar = $('typeTplBar');
+  if (!bar) return;
+  bar.innerHTML = TYPE_TPLS.map(t=>
+    `<button class="chip" data-tpl="${t.name}" style="min-height:34px;padding:6px 12px">${t.emoji} ${t.name}</button>`).join('');
+  bar.querySelectorAll('[data-tpl]').forEach(b=>{
+    b.onclick = ()=>{
+      const t = TYPE_TPLS.find(x=>x.name === b.dataset.tpl);
+      const lines = $('cfgTypes').value.split('\n').map(l=>l.trim()).filter(Boolean);
+      if (lines.some(l=>l.split('=')[0].trim().endsWith(t.name))){
+        toast(`已经有「${t.name}」了，在下面那排标签里改就行`);
+        return;
+      }
+      lines.push(`${t.emoji} ${t.name}=${t.keys.join(',')}`);
+      $('cfgTypes').value = lines.join('\n');
+      renderTypeChips();
+    };
+  });
+  $('cfgTypes').addEventListener('input', renderTypeChips);
+})();
+
+$('btnCfgSave').onclick = async ()=>{
+  try{
+    // 自定义类型：每行「名称=关键词,关键词」，行首可带一个图标
+    const custom = $('cfgTypes').value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
+      let emoji = '';
+      const m = l.match(/^(\p{Extended_Pictographic}[\uFE0F]?)\s+(.+)$/u);
+      if (m){ emoji = m[1]; l = m[2]; }
+      const eq = l.indexOf('=');
+      if (eq < 1) return null;
+      const name = l.slice(0, eq).trim();
+      const keys = l.slice(eq + 1).split(/[,，]/).map(k=>k.trim()).filter(Boolean);
+      return (name && keys.length) ? {emoji, name, keys} : null;
+    }).filter(Boolean);
+    const r = await api('/api/config', {
+      base_url: $('cfgBase').value.trim(),
+      model: $('cfgModel').value.trim(),
+      api_key: $('cfgKey').value.trim(),
+      style: $('styleSel').value,
+      custom_types: custom,
+    });
+    $('cfgKey').value = '';
+    toast(r.has_key ? '已保存，可以一键命名了' : '已保存，建议标题已按新风格刷新');
+    await loadConfig();
+    await load();   // 命名风格变了，建议标题列表立刻跟着刷新
+  }catch(e){ toast('保存失败：'+e.message); }
+};
+
+$('btnCfgClear').onclick = async ()=>{
+  if(!await ask('清掉本机保存的 API Key？\n下次要用得重新填。')) return;
+  try{
+    await api('/api/config', {clear_key: true});
+    toast('已清掉 Key');
+    await loadConfig();
+  }catch(e){ toast('操作失败：'+e.message); }
+};
+
+$('btnNamingAuto').onclick = async ()=>{
+  const b = $('btnNamingAuto');
+  b.disabled = true;
+  const old = b.textContent;
+  b.textContent = '正在调用模型…';
+  $('cfgNote').innerHTML = '正在读摘要、分批调模型，条数多的话要等十几秒。别关窗口。';
+  try{
+    const r = await api('/api/naming/auto', {});
+    if(r.error){ toast(r.error); }
+    else{
+      const u = r.usage || {};
+      toast(`AI 命名 ${r.imported} 条，用了 ${(u.total_tokens||0).toLocaleString()} token`);
+      $('cfgNote').innerHTML = `刚完成：命名 <b>${r.imported}</b> 条，
+        分 ${r.batches} 批，消耗 <b>${(u.total_tokens||0).toLocaleString()}</b> token
+        （输入 ${(u.prompt_tokens||0).toLocaleString()} / 输出 ${(u.completion_tokens||0).toLocaleString()}）。
+        ${(r.errors||[]).length ? '<br>有批次失败：'+esc(r.errors.join('；')) : ''}`;
+      await load();
+    }
+  }catch(e){ toast('调用失败：'+e.message); }
+  b.disabled = false; b.textContent = old;
+  await loadConfig();
+};
+
+$('btnNamingExport').onclick = async ()=>{
+  const b = $('btnNamingExport');
+  b.disabled = true; b.textContent = '正在读对话…';
+  try{
+    const r = await api('/api/naming/export');
+    const out = $('namingOut');
+    out.hidden = false;
+    out.innerHTML = `<b>已导出 ${r.count} 条，文件在这里：</b>
+      <div id="npath">${esc(r.file)}</div>
+      <button class="btn ghost copy" id="btnCopyPath">复制路径</button>
+      <div style="margin-top:8px;color:var(--ink3)">
+        把这个路径发到新的 WorkBuddy 会话里，说「按文件里的 ask 字段给每条会话起名，只返回 JSON」。</div>`;
+    $('btnCopyPath').onclick = async ()=>{
+      try{ await navigator.clipboard.writeText(r.file); toast('路径已复制'); }
+      catch(e){ toast('复制失败，手动选中上面的路径'); }
+    };
+    toast(`已导出 ${r.count} 条会话摘要`);
+  }catch(e){ toast('导出失败：'+e.message); }
+  b.disabled = false; b.textContent = '导出命名请求';
+};
+
+$('btnNamingImport').onclick = async ()=>{
+  const raw = $('namingIn').value.trim();
+  if(!raw){ toast('先把模型返回的 JSON 粘进来'); return; }
+  let payload;
+  try{ payload = JSON.parse(raw); }
+  catch(e){ toast('不是合法 JSON，检查一下有没有多复制或少复制'); return; }
+  try{
+    const r = await api('/api/naming/import', payload);
+    toast(`已导入 ${r.imported} 条 AI 建议`);
+    $('namingIn').value = '';
+    await load();
+  }catch(e){ toast('导入失败：'+e.message); }
+};
+
+$('btnNamingClear').onclick = async ()=>{
+  try{
+    await api('/api/naming/clear', {});
+    toast('已清掉 AI 建议，回到规则判断');
+    $('namingOut').hidden = true;
+    await load();
+  }catch(e){ toast('操作失败：'+e.message); }
+};
+
+/* ---------- 归档 ---------- */
+$('btnArchive').onclick = async ()=>{
+  if(needPick()) return;
+  const picked = STATE.items.filter(x=>SEL.has(x.id));
+  const allArch = picked.every(x=>x.archived);
+  const toArchive = !allArch;
+  const liveN = picked.filter(x=>x.active).length;
+
+  let msg = toArchive
+    ? `要把 ${picked.length} 条会话设为归档吗？\n\n` +
+      `归档后它们从侧栏隐藏，数据完整保留，随时能取消归档。\n在 WorkBuddy 里叫「归档的任务」，在 设置 页能找到。\n` +
+      `WorkBuddy 的自动清理会跳过归档的会话，所以归档反而更安全。\n\n` +
+      `注意：改完要重启 WorkBuddy 才看得到效果。`
+    : `要把 ${picked.length} 条会话取消归档吗？\n\n` +
+      `它们会回到原来的状态。同样需要重启 WorkBuddy 才生效。`;
+  if(liveN && toArchive){
+    msg += `\n\n其中 ${liveN} 条正在使用中（标了「进行中」）。\n` +
+           `归档当前正在跑的会话，可能让 WorkBuddy 侧栏表现异常，建议先跳过它。`;
+  }
+  if(!await ask(msg, toArchive ? '归档' : '取消归档')) return;
+
+  const b = $('btnArchive');
+  b.disabled = true;
+  try{
+    const r = await api('/api/archive', {
+      ids: picked.map(x=>x.id), archive: toArchive,
+    });
+    if(r.error){ toast(r.error); }
+    else{
+      const blocked = (r.blocked||[]).length;
+      toast(`${toArchive?'归档':'取消归档'} ${r.changed} 条${blocked?'，跳过 '+blocked+' 条':''}`);
+      if(r.need_restart){
+        await new Promise(res=>setTimeout(res, 400));
+        toast('改完了，重启 WorkBuddy 后生效');
+      }
+      SEL.clear();
+      await load();
+    }
+  }catch(e){ toast('操作失败：'+e.message); }
+  b.disabled = false;
+  updateBar();
+};
+
+/* ---------- 移到空间 ---------- */
+let MROWS = [];   // 每一行：{id,title,from,to,active,status,why,size_h}
+let MDIRS = [];   // 目录候选，全库去重
+
+const dirTail = p => (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '—';
+
+/* 移空间面板：一行一条会话，各自选目标目录。
+   之前的做法是所有选中项共用一个目标，「这几条去 A、那几条去 B」就做不到。 */
+function renderMoveRows(){
+  const out = $('moveOut');
+  if(!MROWS.length){ out.hidden = true; return; }
+  out.hidden = false;
+
+  const rows = MROWS.map((r, i)=>{
+    const opts = ['<option value="">不搬，留在原地</option>']
+      .concat(MDIRS.map(d=>`<option value="${esc(d)}"${d===r.to?' selected':''}>${esc(dirTail(d))}</option>`))
+      .join('');
+    let tag;
+    if(!r.to) tag = '<span class="tag">不搬</span>';
+    else if(r.to === r.from) tag = '<span class="tag">目录没变</span>';
+    else if(r.status === '可搬') tag = '<span class="tag ok">可搬</span>'
+      + (r.new_dir ? ' <span class="tag warn">会新建目录</span>' : '');
+    else if(r.status) tag = `<span class="tag warn">${esc(r.status)}</span>`;
+    else tag = '<span class="tag">待检查</span>';
+    const live = r.active ? '<span class="tag live">进行中</span> ' : '';
+    return `<tr>
+      <td>${live}<span title="${esc(r.title)}">${esc(r.title || '（无名）')}</span></td>
+      <td class="dir" title="${esc(r.from)}">${esc(dirTail(r.from))}</td>
+      <td><select data-i="${i}" style="width:100%;min-height:36px;font-size:13px;
+        padding:5px 8px;border:1px solid var(--line);border-radius:var(--r8);
+        background:var(--card);color:var(--ink)">${opts}</select></td>
+      <td class="dir">${esc(r.size_h || '—')}</td>
+      <td>${tag}</td>
+      <td class="dir" title="${esc(r.why||'')}">${esc(r.why || '')}</td>
+    </tr>`;
+  }).join('');
+
+  out.innerHTML = `<div class="tblwrap"><table class="fit">
+    <thead><tr>
+      <th style="width:27%">会话</th>
+      <th style="width:14%">现在在哪</th>
+      <th style="width:20%">归到</th>
+      <th style="width:10%">正文</th>
+      <th style="width:11%">状态</th>
+      <th style="width:18%">说明</th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+
+  // 没有一行是「可搬」时，确认搬运置灰并说明原因，而不是点了才弹 toast
+  const ready = MROWS.filter(r=>r.status === '可搬').length;
+  const run = $('btnMoveRun');
+  run.classList.toggle('disabled', ready === 0);
+  run.title = ready ? `已检查通过 ${ready} 条，可搬运`
+                    : '还没有检查通过的行：先选目标目录，点「检查」，通过了才能搬';
+
+  out.querySelectorAll('select[data-i]').forEach(s=>{
+    s.onchange = ()=>{
+      const r = MROWS[+s.dataset.i];
+      r.to = s.value;
+      r.status = ''; r.why = ''; r.size_h = '';
+      renderMoveRows();
+    };
+  });
+  updateMoveBtns();
+}
+
+function updateMoveBtns(){
+  const todo = MROWS.filter(r=>r.to && r.to !== r.from);
+  const ok = todo.filter(r=>r.status === '可搬').length;
+  const unknown = todo.filter(r=>!r.status).length;
+  $('btnMoveRun').disabled = ok === 0;
+  $('moveSum').textContent = todo.length
+    ? `要搬 ${todo.length} 条（可搬 ${ok}${unknown ? `，待检查 ${unknown}` : ''}）`
+    : '还没选目标目录';
+}
+
+/* 把某一行之前「跳过的原因」清掉，比如目标换了就得重新检查 */
+function resetRow(r){ r.status = ''; r.why = ''; r.size_h = ''; }
+
+function bulkSet(dir){
+  if(!dir) return false;
+  let n = 0;
+  MROWS.forEach(r=>{
+    if(r.to !== dir){ r.to = dir; resetRow(r); n++; }
+  });
+  renderMoveRows();
+  return n > 0;
+}
+
+$('btnMoveClose').onclick = ()=>closeSheet('movePanel');
+
+$('btnMoveSel').onclick = ()=>{
+  if(needPick()) return;
+  openMovePanel(STATE.items.filter(x=>SEL.has(x.id)).map(x=>({
+    id: x.id, title: x.current, from: x.cwd, to: '',
+    active: !!x.active, status: '', why: '', size_h: '',
+  })));
+};
+
+/* 打开移空间面板。rows 决定列哪些会话、各自建议去哪。
+   「一键整理」和手动移空间都走这里，逻辑只有一份。 */
+function openMovePanel(rows, opts){
+  MDIRS = [...new Set(STATE.items.map(x=>x.cwd))].sort();
+  const cnt = {};
+  STATE.items.forEach(x=>{ cnt[x.cwd] = (cnt[x.cwd] || 0) + 1; });
+  const sorted = MDIRS.slice().sort((a,b)=>(cnt[b]||0)-(cnt[a]||0));
+
+  $('dirList').innerHTML = MDIRS.map(d=>`<option value="${esc(d)}">`).join('');
+  $('dirChips').innerHTML =
+    `<span class="sub" style="width:100%;margin-bottom:2px">点一下，把下面所有行都设为这个目录；再单独改个别行</span>` +
+    sorted.map(d=>`<button class="chip" data-dir="${esc(d)}" style="min-height:36px;
+      font-size:13px;padding:6px 12px">${esc(dirTail(d))}
+      <span style="color:var(--ink3);margin-left:4px">${cnt[d]||0}</span></button>`).join('');
+
+  MROWS = rows;
+
+  $('dirChips').querySelectorAll('[data-dir]').forEach(b=>{
+    b.onclick = ()=>{
+      $('moveTarget').value = b.dataset.dir;
+      if(bulkSet(b.dataset.dir)) $('btnMoveCheck').click();
+    };
+  });
+
+  $('moveTarget').value = (opts && opts.target) || '';
+  ['maintPanel','aiPanel','trashPanel','wsPanel'].forEach(closeSheet);
+  $('movePanel').classList.add('on');
+  renderMoveRows();
+}
+
+// 手输目录后回车或失焦，同样当成「批量设置」
+$('moveTarget').addEventListener('change', ()=>{
+  const v = $('moveTarget').value.trim();
+  if(v) bulkSet(v);
+});
+
+$('btnMoveCheck').onclick = async ()=>{
+  const todo = MROWS.filter(r=>r.to && r.to !== r.from);
+  if(!todo.length){ toast('先给至少一条会话选个目标目录'); return; }
+  const b = $('btnMoveCheck');
+  b.disabled = true; b.textContent = '检查中…';
+  try{
+    const r = await api('/api/move/preview',
+      {pairs: todo.map(x=>({id: x.id, cwd: x.to}))});
+    if(r.error){ toast(r.error); }
+    else{
+      r.items.forEach((it, k)=>{
+        const t = todo[k];
+        if(!t) return;
+        t.status = it.status;
+        t.why = it.why || '';
+        t.size_h = it.size_h || '';
+        t.new_dir = it.new_dir;
+      });
+      toast(`检查完成：可搬 ${r.can_move} 条，跳过 ${r.blocked} 条`);
+      if(r.wb_running) toast('WorkBuddy 在运行，正在写的那条会被自动跳过');
+    }
+    renderMoveRows();
+  }catch(e){ toast('检查失败：' + e.message); }
+  b.disabled = false; b.textContent = '检查';
+};
+
+$('btnMoveRun').onclick = async ()=>{
+  if($('btnMoveRun').classList.contains('disabled')){
+    toast('还没有检查通过的行：先选目标目录，点「检查」，通过了才能搬');
+    return;
+  }
+  const todo = MROWS.filter(r=>r.to && r.to !== r.from && r.status === '可搬');
+  if(!todo.length){ toast('没有可搬的行，先点「检查」'); return; }
+
+  const by = {};
+  todo.forEach(r=>{ by[r.to] = (by[r.to] || 0) + 1; });
+  const lines = Object.keys(by).map(t=>`  ${dirTail(t)}：${by[t]} 条`).join('\n');
+  if(!await ask(`确认搬这 ${todo.length} 条？\n\n去向：\n${lines}\n\n` +
+    `会同时搬动磁盘上的会话文件（含工具输出目录），改坏了可以用「备份与还原」恢复。`,
+    '确认搬运')) return;
+
+  const b = $('btnMoveRun');
+  b.disabled = true; b.textContent = '搬运中…';
+  try{
+    const r = await api('/api/move', {pairs: todo.map(x=>({id: x.id, cwd: x.to}))});
+    const blocked = (r.blocked || []).length;
+    toast(`搬了 ${r.changed} 条${blocked ? '，跳过 ' + blocked + ' 条' : ''}`);
+    closeSheet('movePanel');
+    SEL.clear();
+    await load();
+  }catch(e){ toast('搬运失败：' + e.message); }
+  b.disabled = false; b.textContent = '确认搬运';
+};
+
+/* ---------- 视图切换 ---------- */
+function showView(v){
+  document.body.dataset.view = v;
+  document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on', x.id === 'view'+v[0].toUpperCase()+v.slice(1)));
+  document.querySelectorAll('#tabs .tab').forEach(t=>t.classList.toggle('on', t.dataset.view === v));
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('#tabs .tab').forEach(t=>{
+  t.onclick = ()=>showView(t.dataset.view);
+});
+
+/* ---------- 主页 ---------- */
+function renderHome(){
+  const s = STATE.stats || {};
+  const bc = $('badgeChange');
+  if (bc) bc.textContent = `待改 ${s.need_change ?? '—'}`;
+  const bs = $('badgeSnap');
+  if (bs) bs.textContent = `快照 ${STATE.backups ? STATE.backups.length : '—'}`;
+  // 急救角标：异步拉，失败就静默
+  api('/api/trash').then(r=>{
+    const n = (r.items || []).filter(x=>x.file_ok).length;
+    const bt = $('badgeTrash');
+    if (bt){ bt.textContent = `可救 ${n}`; bt.closest('.hcard').classList.toggle('bad', n > 0); }
+  }).catch(()=>{});
+  // 提醒行：只放警示，数据库路径顶栏已经有了，不重复
+  const hw = $('homeWarn');
+  if (hw){
+    const tips = [];
+    if (!STATE.platform_ok) tips.push('当前系统不是 Windows，搬移类功能已停用');
+    if (s.conflict) tips.push(`有 ${s.conflict} 条会话标题和目录都没命中规则，建议人工确认`);
+    if (s.dup_extra) tips.push(`有 ${s.dup_extra} 条重名会话，靠目录区分，建议改名`);
+    hw.innerHTML = tips.length
+      ? tips.map(t=>`<p class="note" style="margin:${t===tips[0]?'0':'6px'} 0 0;color:var(--warn)">· ${esc(t)}</p>`).join('')
+      : '';
+    hw.style.display = tips.length ? '' : 'none';
+  }
+  // 最近动态：前 3 条
+  api('/api/history').then(r=>{
+    const box = $('homeHist');
+    if (!box) return;
+    const top = (r.items || []).slice(0, 3);
+    box.innerHTML = top.length
+      ? top.map(h=>{
+          const when = (h.at || '').replace('T', ' ').slice(5, 16);
+          return `<div class="histrow"><div class="histmeta"><span class="tag">${esc(h.action || '')}</span>
+            <span class="sub">${esc(when)}</span><span class="sub">${h.changed || 0} 条</span></div>
+            <span class="histnote">${esc(h.note || '')}</span></div>`;
+        }).join('')
+      : '<p class="note" style="margin:8px 0 0">还没有操作记录。第一次改动之后，这里就会有。</p>';
+  }).catch(()=>{});
+}
+
+// 主页入口卡：触发隐藏的功能按钮，handler 与旧版完全一致
+$('hcSessions').onclick = ()=>showView('sessions');
+$('hcAi').onclick       = ()=>$('btnAi').click();
+$('hcTrash').onclick    = ()=>$('btnTrash').click();
+$('hcWs').onclick       = ()=>$('btnWs').click();
+$('hcBackup').onclick   = ()=>$('btnMaint').click();
+$('hcHist').onclick     = ()=>$('btnMaint').click();
+$('btnHomeAll').onclick = ()=>$('btnMaint').click();
+
+/* ---------- 维护 ---------- */
+// 「维护」不再弹浮层，切到维护视图（路径统一 / 存储占用 / 备份还原 / 操作历史都在里面）
+$('btnMaint').onclick = async ()=>{
+  showView('maint');
+  await Promise.all([loadPaths(), loadStorage(), loadHistory()]);
+};
+
+/* ---------- 操作历史 ---------- */
+async function loadHistory(){
+  const out = $('histOut');
+  try{
+    const r = await api('/api/history');
+    if(!r.count){
+      out.innerHTML = '<p class="note">还没有记录。改一次标题、移空间或归档之后，这里就会出现。' +
+        '每条都留着当时的快照，能原路退回。</p>';
+      return;
+    }
+    const rows = r.items.map(h=>{
+      const btn = h.can_undo
+        ? `<button class="btn ghost" data-undo="${esc(h.snapshot)}"
+             style="min-height:34px;font-size:13px;padding:4px 14px">撤回</button>`
+        : '<span class="sub" style="flex:none">快照已过期</span>';
+      return `<div class="histrow">
+        <span class="histmeta">
+          <span style="font-size:12px;color:var(--ink2);font-variant-numeric:tabular-nums">${esc((h.at || '').slice(5))}</span>
+          <span class="tag">${esc(h.action || '')}</span>
+          <span class="sub" style="margin:0">${h.changed || 0} 条</span>
+        </span>
+        <span class="histnote" title="${esc(h.note || '')}">${esc(h.note || '')}</span>
+        ${btn}
+      </div>`;
+    }).join('');
+
+    out.innerHTML = rows +
+      `<p class="note" style="margin-top:10px">共 ${r.count} 条记录，显示最近 ${r.items.length} 条。</p>`;
+
+    out.querySelectorAll('[data-undo]').forEach(b=>{
+      b.onclick = async ()=>{
+        const snap = b.dataset.undo;
+        if(!await ask(`退回到这一步之前？\n\n会把标题、目录、归档状态恢复成那一刻的样子。\n` +
+          `如果涉及移动空间，磁盘上的会话文件也会一起搬回去。\n\n` +
+          `当前状态会先自动存一份，撤错了还能再撤回来。`, '撤回')) return;
+        b.disabled = true; b.textContent = '撤回中…';
+        try{
+          const x = await api('/api/history/undo', {snapshot: snap});
+          if(x.error){ toast(x.error); }
+          else{
+            toast(`撤回完成，恢复 ${x.changed} 条` + (x.moved_files ? `，搬回 ${x.moved_files} 个文件` : ''));
+            await load(); await loadHistory();
+          }
+        }catch(e){ toast('撤回失败：' + e.message); }
+        b.disabled = false; b.textContent = '撤回';
+      };
+    });
+  }catch(e){
+    out.innerHTML = '<p class="note">读取历史失败：' + esc(e.message) + '</p>';
+  }
+}
+
+$('btnHistReload').onclick = ()=>loadHistory();
+
+/* ---------- 工作空间 ---------- */
+let WSEL = new Set();
+
+$('btnWsClose').onclick = ()=>closeSheet('wsPanel');
+
+$('btnWs').onclick = async ()=>{
+  ['maintPanel','aiPanel','movePanel','trashPanel'].forEach(closeSheet);
+  $('wsPanel').classList.add('on');
+  WSEL.clear();
+  await loadWorkspaces();
+};
+
+async function loadWorkspaces(){
+  $('wsNote').textContent = '正在扫描…';
+  $('wsOut').innerHTML = '';
+  try{
+    const [ws, disks, rh] = await Promise.all([
+      api('/api/workspaces'), api('/api/disks'), api('/api/rehome/plan')
+    ]);
+    renderDisks(disks);
+    renderRehome(rh);
+    renderWorkspaces(ws);
+  }catch(e){
+    $('wsNote').textContent = '扫描失败：' + e.message;
+  }
+}
+
+/* 散落会话：自动挑出来、自动给建议，但最终去哪由人点。 */
+function renderRehome(r){
+  if(!r.count){
+    $('rehomeNote').innerHTML =
+      '没有散落在临时目录里的会话。你现在的分组是干净的，不用整理。';
+    $('rehomeOut').innerHTML = '';
+    return;
+  }
+  const byDir = {};
+  r.items.forEach(x=>{ byDir[x.from_dir] = (byDir[x.from_dir] || 0) + 1; });
+  const groups = Object.keys(byDir).map(d=>
+    `<span class="tag" style="margin-right:6px">${esc(d)} · ${byDir[d]} 条</span>`).join('');
+  const gotSug = r.items.filter(x=>x.suggest).length;
+
+  $('rehomeNote').innerHTML =
+    `找到 <b>${r.count}</b> 条散落在自动生成目录里的会话，` +
+    `其中 <b>${gotSug}</b> 条能按标题认出该去哪个项目，` +
+    `<b>${r.count - gotSug}</b> 条认不出。`;
+  $('rehomeOut').innerHTML = `
+    <div style="margin:8px 0">${groups}</div>
+    <p class="note">
+      点下面的按钮会把它们列进移空间面板，建议去处已经填好，你确认或改完再搬。
+      新项目会建在 <b>${esc(r.create_root)}</b>。
+    </p>
+    <div class="bar" style="margin-top:8px">
+      <button class="btn" id="btnRehome">一键分类整理（${r.count} 条）</button>
+    </div>`;
+  const btn = $('btnRehome');
+  if(btn){
+    btn.onclick = ()=>{
+      const rows = r.items.map(x=>({
+        id: x.id, title: x.title, from: x.from, to: x.suggest || '',
+        active: x.active, status: '', why: x.why, size_h: '',
+      }));
+      openMovePanel(rows, {});
+      toast(`已列出 ${r.count} 条，认不出的请自己点个目标`);
+    };
+  }
+}
+
+function renderDisks(d){
+  const rows = d.drives.map(x=>{
+    const cur = d.current_root && d.current_root.toUpperCase().startsWith(x.drive);
+    return `<div class="histrow">
+      <span class="histmeta" style="width:64px">
+        <span style="font-weight:600">${x.drive}</span>
+        ${x.is_system ? '<span class="tag warn">系统盘</span>' : ''}
+        ${cur ? '<span class="tag ok">当前</span>' : ''}
+      </span>
+      <span class="trashname">可用 ${x.free_gb} GB / 共 ${x.total_gb} GB</span>
+      <span class="sub" style="flex:none;margin:0;width:74px;text-align:right">评分 ${x.score}</span>
+      <span class="sub" style="flex:none;margin:0;width:150px;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap"
+        title="${esc((x.existing_ws||[]).join('、'))}">
+        ${x.existing_ws && x.existing_ws.length ? '已有工作空间' : '—'}</span>
+    </div>`;
+  }).join('');
+
+  const warn = d.current_on_system_drive
+    ? `<p class="note" style="margin-top:10px;color:var(--warn)">
+        你的工作空间现在放在系统盘（C 盘）。建议挪到其他盘：C 盘空间紧张时，
+        系统会把旧文件挤走，而且每次读写都要过一遍用户目录。
+        推荐位置：<b>${esc(d.suggest_root)}</b>。
+       </p>`
+    : `<p class="note" style="margin-top:10px">
+        当前放在 <b>${esc(d.current_root)}</b>，不在系统盘，位置是合适的。
+        推荐位置：<b>${esc(d.suggest_root)}</b>。
+       </p>`;
+
+  $('diskOut').innerHTML = rows + warn;
+}
+
+function renderWorkspaces(w){
+  if(!w.exists){
+    $('wsNote').textContent = `没找到默认工作空间目录：${w.root}`;
+    $('wsOut').innerHTML = '';
+    updateWsSel();
+    return;
+  }
+  const LABEL = {
+    inuse:  ['blue', '在用'],
+    memory: ['warn', '有记忆'],
+    files:  ['', '有文件'],
+    empty:  ['ok', '可清理'],
+  };
+  $('wsNote').innerHTML =
+    `位置 <b>${esc(w.root)}</b> · 共 ${w.total} 个文件夹 · 合计 ${w.total_size_h} · ` +
+    `其中 <b>${w.cleanable}</b> 个可以直接清。`;
+
+  if(!w.items.length){
+    $('wsOut').innerHTML = '<p class="note">这个目录是空的，没什么要整理。</p>';
+    updateWsSel();
+    return;
+  }
+
+  $('wsOut').innerHTML = w.items.map(x=>{
+    const [cls, text] = LABEL[x.state] || ['', x.state];
+    const can = x.cleanable;
+    const detail = x.memory_files.length
+      ? `记忆：${x.memory_files.join('、')}`
+      : (x.other_files.length ? `文件：${x.other_files.join('、')}` : '');
+    // 日期数字名的文件夹没有可读信息：给「看记忆」和「改名」两个动作
+    const looksAuto = /^\d{4}-\d{2}-\d{2}/.test(x.name) || /^automation-/.test(x.name);
+    const actions = (x.state === 'memory' || x.state === 'files')
+      ? `<button class="btn ghost" data-wslook="${esc(x.path)}"
+           style="flex:none;min-height:30px;font-size:12px;padding:2px 10px">看记忆</button>` +
+         (looksAuto && x.state === 'memory'
+           ? `<button class="btn ghost" data-wsrename="${esc(x.path)}" data-name="${esc(x.name)}"
+                style="flex:none;min-height:30px;font-size:12px;padding:2px 10px">改名</button>`
+           : '')
+      : '';
+    return `<div class="histrow${can ? '' : ' faded'}">
+      <input type="checkbox" data-wsp="${esc(x.path)}" ${WSEL.has(x.path)?'checked':''}
+        ${can ? '' : 'disabled'} style="flex:none;width:18px;height:18px;accent-color:var(--blue)">
+      <span class="trashname" title="${esc(x.path)}">${esc(x.name)}</span>
+      <span class="tag ${cls}" style="flex:none">${text}</span>
+      <span class="sub" style="flex:none;margin:0;width:70px;text-align:right">${x.size_h}</span>
+      <span class="sub" style="flex:none;margin:0;width:200px;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap" title="${esc(detail || x.why)}">
+        ${esc(detail || x.why)}</span>
+      ${actions}
+    </div>`;
+  }).join('');
+
+  $('wsOut').querySelectorAll('input[data-wsp]').forEach(cb=>{
+    cb.onchange = ()=>{
+      cb.checked ? WSEL.add(cb.dataset.wsp) : WSEL.delete(cb.dataset.wsp);
+      updateWsSel();
+    };
+  });
+  // 看记忆：二层弹窗展示 memory.md 原文，纯只读
+  $('wsOut').querySelectorAll('[data-wslook]').forEach(b=>{
+    b.onclick = async ()=>{
+      openSheet('detailSheet');
+      const body = $('detailSheetBody');
+      body.innerHTML = '<p class="note">读取中…</p>';
+      try{
+        const r = await api('/api/workspaces/memory', {path: b.dataset.wslook});
+        if (r.error){ body.innerHTML = `<p class="note">${esc(r.error)}</p>`; return; }
+        body.innerHTML = r.items.map(m=>
+          `<div class="sub-h">${esc(m.file)}（${m.chars} 字${m.truncated ? '，只显示开头' : ''}）</div>
+           <pre style="white-space:pre-wrap;font-size:13px;background:#f7f7f8;
+             border-radius:8px;padding:12px 14px;max-height:40vh;overflow:auto">${esc(m.head || m.error)}</pre>`
+        ).join('');
+      }catch(e){ body.innerHTML = `<p class="note">读取失败：${esc(e.message)}</p>`; }
+    };
+  });
+  // 改名：把 automation-2026-… 这种数字名换成看得懂的名字（纯 mv，内容不动）
+  $('wsOut').querySelectorAll('[data-wsrename]').forEach(b=>{
+    b.onclick = async ()=>{
+      const old = b.dataset.name;
+      const nn = prompt(`把「${old}」改成什么名字？（比如：老账号迁移、6月日常备份）`, '');
+      if (!nn || !nn.trim()) return;
+      try{
+        const r = await api('/api/workspaces/rename', {path: b.dataset.wsrename, new_name: nn.trim()});
+        if (r.error){ toast(r.error); return; }
+        toast('已改名，内容一个字没动');
+        loadWs();
+      }catch(e){ toast('改名失败：'+e.message); }
+    };
+  });
+  updateWsSel();
+}
+
+function updateWsSel(){
+  const n = WSEL.size;
+  $('btnWsClean').classList.toggle('disabled', n === 0);
+  $('wsSel').textContent = n ? `已选 ${n} 个` : '';
+}
+
+$('btnWsPickEmpty').onclick = async ()=>{
+  try{
+    const w = await api('/api/workspaces');
+    WSEL.clear();
+    w.items.filter(x=>x.cleanable).forEach(x=>WSEL.add(x.path));
+    renderWorkspaces(w);
+    if(!WSEL.size) toast('没有可以直接清理的空文件夹');
+  }catch(e){ toast('读取失败：' + e.message); }
+};
+
+$('btnWsClean').onclick = async ()=>{
+  const paths = [...WSEL];
+  if(!paths.length){ toast('先勾选带「可清理」标签的空文件夹；灰的行有记忆/文件，受保护清不了'); return; }
+  const names = paths.map(p=>p.replace(/[\\/]+$/,'').split(/[\\/]/).pop()).join('\n  ');
+  if(!await ask(
+      `要删掉这 ${paths.length} 个文件夹？\n\n  ${names}\n\n` +
+      `只会删「完全空」的文件夹。检查时只要有文件就整体拒绝，不会递归删内容。\n` +
+      `这一步不会动任何会话和记忆文件。`, `删除 ${paths.length} 个空文件夹`)) return;
+
+  const b = $('btnWsClean');
+  b.classList.add('disabled'); b.textContent = '清理中…';
+  try{
+    const r = await api('/api/workspaces/clean', {paths});
+    if(r.error){ toast(r.error); }
+    else{
+      toast(`删掉 ${r.removed} 个空文件夹` +
+            (r.blocked && r.blocked.length ? `，${r.blocked.length} 个没删` : ''));
+      if(r.wb_running){
+        setTimeout(()=>toast('WorkBuddy 正在运行：个别文件夹可能被它临时占用，没删掉的等它退出再试', 5000), 1300);
+      }
+      if(r.blocked && r.blocked.length){
+        const why = r.blocked.map(x=>`${x.path.split(/[\\/]/).pop()}：${x.why}`)
+          .filter((v,i,a)=>a.indexOf(v)===i).join('\n');
+        setTimeout(()=>ask(`有 ${r.blocked.length} 个文件夹没删掉，原因：\n\n${why}`, '知道了'), 2600);
+      }
+      WSEL.clear();
+      await loadWorkspaces();
+    }
+  }catch(e){ toast('清理失败：' + e.message); }
+  b.classList.remove('disabled'); b.textContent = '清理选中的空文件夹';
+  updateWsSel();
+};
+
+/* ---------- 数据急救 ---------- */
+let TRASH = [];
+let TSEL = new Set();
+
+$('btnTrashClose').onclick = ()=>closeSheet('trashPanel');
+
+$('btnTrash').onclick = async ()=>{
+  ['maintPanel','aiPanel','movePanel'].forEach(closeSheet);
+  closeSheet('detailSheet');
+  $('trashPanel').classList.add('on');
+  TSEL.clear();
+  await loadTrash();
+};
+
+async function loadTrash(){
+  $('trashSum').textContent = '正在扫描…';
+  $('trashOut').innerHTML = '';
+  try{
+    const r = await api('/api/trash');
+    TRASH = r.items || [];
+    $('trashSum').innerHTML =
+      `删除记录 <b>${r.count}</b> 条：<b>${r.recoverable}</b> 条能救（正文还在），` +
+      `<b style="color:var(--warn)">${r.lost}</b> 条救不回（正文已被系统清掉）。`;
+    renderTrash();
+  }catch(e){
+    $('trashSum').textContent = '扫描失败：' + e.message;
+  }
+}
+
+function renderTrash(){
+  const out = $('trashOut');
+  if(!TRASH.length){
+    out.innerHTML = '<p class="note">没有已删除的会话。这里空着是好事。</p>';
+    updateTrashSel();
+    return;
+  }
+  out.innerHTML = TRASH.map(x=>{
+    const can = x.file_ok;
+    const tag = can ? '<span class="tag ok" style="flex:none">可救</span>'
+                    : '<span class="tag" style="flex:none">救不回</span>';
+    const moved = x.moved_from
+      ? '<span class="tag warn" style="flex:none">正文在别处</span>' : '';
+    return `<div class="histrow${can ? '' : ' faded'}">
+      <input type="checkbox" data-tid="${esc(x.id)}" ${TSEL.has(x.id)?'checked':''}
+        ${can ? '' : 'disabled'} style="flex:none;width:18px;height:18px;accent-color:var(--blue)">
+      <span class="trashname" title="${esc(x.title)}">${esc(x.title)}</span>
+      ${tag}${moved}
+      <span class="sub" style="flex:none;margin:0;width:74px;text-align:right">${x.size_h}</span>
+      <span class="sub" style="flex:none;margin:0;width:112px">${esc(x.deleted_h)}</span>
+      <span class="sub" style="flex:none;margin:0;width:104px;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap" title="${esc(x.cwd)}">${esc(x.dir)}</span>
+      ${can ? `<button class="btn ghost" data-insp="${esc(x.id)}"
+        style="flex:none;min-height:30px;font-size:12px;padding:2px 10px">详情</button>` : ''}
+    </div>`;
+  }).join('');
+
+  out.querySelectorAll('input[data-tid]').forEach(cb=>{
+    cb.onchange = ()=>{
+      cb.checked ? TSEL.add(cb.dataset.tid) : TSEL.delete(cb.dataset.tid);
+      updateTrashSel();
+    };
+  });
+  out.querySelectorAll('[data-insp]').forEach(b=>{
+    b.onclick = ()=>showTrashDetail(b.dataset.insp);
+  });
+  updateTrashSel();
+}
+
+function updateTrashSel(){
+  const n = TSEL.size;
+  $('btnTrashRestore').classList.toggle('disabled', n === 0);
+  $('trashSel').textContent = n ? `已选 ${n} 条` : '还没选';
+}
+
+async function showTrashDetail(sid){
+  // 详情是独立的一层弹窗（盖在急救面板上面），有明确的「返回」键，
+  // 不再依赖「点空白处关闭」这种隐藏操作
+  const d = $('detailSheetBody');
+  openSheet('detailSheet');
+  d.innerHTML = '<p class="note">读取中…</p>';
+  try{
+    const r = await api('/api/trash/inspect?id=' + encodeURIComponent(sid));
+    if(r.error){ d.innerHTML = `<p class="note">${esc(r.error)}</p>`; return; }
+    d.innerHTML = `<div style="font-weight:600;margin-bottom:8px">${esc(r.title)}</div>
+      <div class="sub" style="margin:0 0 4px">
+        ${esc(r.size_h)} · ${r.lines} 行 · 你说了 ${r.n_user} 条 · AI 回了 ${r.n_ai} 条 · 调工具 ${r.n_tool} 次
+      </div>
+      <div class="sub" style="margin:0">
+        建于 ${esc(r.created_h)} · 删于 ${esc(r.deleted_h)} · 原目录 ${esc(r.dir)}
+      </div>
+      <div class="sub-h" style="margin-top:14px">当时的提问</div>
+      <p class="note" style="margin:0">${esc(r.first_user)}</p>
+      <div class="sub-h">AI 开头说了什么</div>
+      <p class="note" style="margin:0">${esc(r.first_ai)}</p>
+      ${r.last_ai ? `<div class="sub-h">最后一次回复</div>
+        <p class="note" style="margin:0">${esc(r.last_ai)}</p>` : ''}
+      <p class="note" style="margin-top:12px;color:var(--ink3)">
+        文件位置：${esc(r.file)}</p>`;
+  }catch(e){ d.innerHTML = `<p class="note">读取失败：${esc(e.message)}</p>`; }
+}
+
+$('btnTrashPickOk').onclick = ()=>{
+  TSEL.clear();
+  TRASH.filter(x=>x.file_ok).forEach(x=>TSEL.add(x.id));
+  renderTrash();
+};
+$('btnTrashClearSel').onclick = ()=>{ TSEL.clear(); renderTrash(); };
+
+$('btnTrashRestore').onclick = async ()=>{
+  const ids = [...TSEL];
+  if(!ids.length){ toast('先勾选要恢复的会话'); return; }
+  const target = $('trashTarget').value.trim();
+  const msg = `恢复这 ${ids.length} 条会话？\n\n` +
+    `只做两件事：去掉删除标记、把正文放回该在的位置。\n` +
+    `标题和对话内容一个字都不会改。\n\n` +
+    (target ? `会归到：${target}` : `回到它们各自原来的目录。`) +
+    `\n\n恢复前会自动备份一份。`;
+  if(!await ask(msg, `恢复 ${ids.length} 条`)) return;
+
+  const b = $('btnTrashRestore');
+  b.classList.add('disabled'); b.textContent = '恢复中…';
+  try{
+    const r = await api('/api/trash/restore', {ids, target_cwd: target || null});
+    if(r.error){ toast(r.error); }
+    else{
+      const bad = (r.blocked || []).length;
+      toast(`恢复 ${r.changed} 条${bad ? `，${bad} 条没救回` : ''}`);
+      if(bad){
+        const why = r.blocked.map(x=>x.why).filter((v,i,a)=>a.indexOf(v)===i).join('；');
+        setTimeout(()=>toast('没救回的原因：' + why), 1200);
+      }
+      TSEL.clear();
+      await loadTrash();
+      await load();
+    }
+  }catch(e){ toast('恢复失败：' + e.message); }
+  b.classList.remove('disabled'); b.textContent = '恢复选中的';
+  updateTrashSel();
+};
+
+async function loadPaths(){
+  try{
+    const r = await api('/api/paths');
+    if(!r.total_groups){
+      $('pathNote').textContent = '没有发现写法分裂，侧栏分组干净。';
+      $('pathOut').innerHTML = '';
+      $('btnUnify').disabled = true;
+      $('btnUnify').title = '没有可统一的写法，这个按钮现在用不上';
+      return;
+    }
+    $('pathNote').innerHTML = `发现 <b>${r.total_groups}</b> 组目录被写成两种样子，
+      涉及 <b>${r.total_sessions}</b> 条会话，侧栏会把它们裂成两组。统一成一种写法就合回去了。`;
+    $('pathOut').innerHTML = `<div class="tblwrap"><table class="fit">
+      <thead><tr>
+        <th style="width:44%">目录</th>
+        <th style="width:56%">现有写法 · 条数</th>
+      </tr></thead>
+      <tbody>${r.groups.map(g=>`<tr>
+        <td class="dir" title="${esc(g.target)}">${esc(g.target.split(/[\\/]/).pop())}</td>
+        <td class="dir">${g.styles.map(s=>esc(s.includes('/')?'正斜杠':'反斜杠')).join(' / ')}
+          · ${g.count} 条</td></tr>`).join('')}</tbody></table></div>`;
+    $('btnUnify').disabled = false;
+    $('btnUnify').title = '';
+  }catch(e){ $('pathNote').textContent = '检查失败：'+e.message; }
+}
+
+$('btnUnify').onclick = async ()=>{
+  if(!await ask('统一后侧栏分组会合并，会话正文不动。\n先自动备份一份，确认继续？', '统一')) return;
+  try{
+    const r = await api('/api/paths/unify', {});
+    toast(`合并 ${r.groups} 组，改了 ${r.changed} 条会话的写法`);
+    await loadPaths();
+    await load();
+  }catch(e){ toast('统一失败：'+e.message); }
+};
+
+async function loadStorage(){
+  try{
+    const s = await api('/api/storage');
+    $('storeNote').innerHTML = `快照 <b>${s.backups.count}</b> 份（${s.backups.human}），
+      命名导出包 <b>${s.naming_requests.count}</b> 个（${s.naming_requests.human}），
+      合计 ${s.total_human}。
+      ${s.naming_extra ? `有 ${s.naming_extra} 个旧导出包可以清掉，只保留最近 ${s.naming_keep} 个。`
+                       : '暂时没有多余文件。'}`;
+    $('btnClean').disabled = s.naming_extra === 0;
+    // 空间体检：正文目录占多少、已删会话残留多少、数据库所在盘还剩多少
+    const warnDrive = /^c:/i.test(s.drive || '') ;
+    $('spaceNote').innerHTML =
+      `会话正文共 <b>${s.projects_human}</b>（${s.projects_count} 个文件）· ` +
+      `数据库在 <b>${esc(s.drive)}</b>，该盘剩余 <b${warnDrive ? ' style="color:var(--bad)"' : ''}>${s.drive_free_human}</b>` +
+      (s.junk_count
+        ? ` · <span style="color:var(--bad)">已删会话还留着一个 ${s.junk_human} 的残留文件，可以清</span>`
+        : ' · 没有已删会话的残留文件');
+    $('btnPurgeJunk').hidden = !s.junk_count;
+  }catch(e){ $('storeNote').textContent = '统计失败：'+e.message; }
+}
+
+/* 清理已删会话残留：会话已删，文件纯属垃圾。
+   分批调用并显示进度——137 个文件一批删容易让请求超时没反馈。
+   WorkBuddy 开着时个别文件可能被占用，每批的失败原因都收集起来最后讲清楚。 */
+$('btnPurgeJunk').onclick = async ()=>{
+  if (!await ask('清理「已删除会话」留下的残留文件？\n\n' +
+      '这些会话已经在回收站里删掉了，正文文件留在盘上纯粹占地方。\n' +
+      '清了能腾出空间，但删了就真没了（本来也救不回这些会话）。\n' +
+      '活跃会话的文件一个都不会碰。', '清理残留')) return;
+  const b = $('btnPurgeJunk');
+  b.disabled = true;
+  try{
+    // 先拿残留清单（正文还在盘上的已删会话）
+    const t = await api('/api/trash');
+    const ids = (t.items || []).filter(x=>x.file_ok).map(x=>x.id);
+    if (!ids.length){ toast('没有残留文件，都是干净的'); return; }
+    let removed = 0, freed = '';
+    const fails = [];
+    const CH = 20;
+    for (let i = 0; i < ids.length; i += CH){
+      b.textContent = `清理中 ${Math.min(i + CH, ids.length)}/${ids.length}…`;
+      const r = await api('/api/trash/purge', {ids: ids.slice(i, i + CH)});
+      if (r.error){ toast(r.error); return; }
+      // 后端 removed 是个数（int），freed 是可读字符串
+      removed += (typeof r.removed === 'number') ? r.removed : (r.removed || []).length;
+      freed = r.freed || freed;
+      (r.skipped || []).forEach(s=>fails.push(s.why || '未知原因'));
+    }
+    toast(`清掉 ${removed} 个文件，释放 ${freed}`);
+    if (fails.length){
+      const uniq = [...new Set(fails)].join('\n');
+      ask(`有 ${fails.length} 个文件没删掉（不影响别的）。\n\n原因：\n${uniq}\n\n` +
+          `多半是文件正被占用——完全退出 WorkBuddy（右下角托盘也退掉）再点一次就能清干净。`,
+          '知道了');
+    }
+    await loadStorage();
+  }catch(e){ toast('失败：'+e.message); }
+  b.disabled = false; b.textContent = '清理已删会话的残留文件';
+};
+
+$('btnMoveGuide').onclick = ()=>{ $('moveGuide').hidden = !$('moveGuide').hidden; };
+
+$('btnClean').onclick = async ()=>{
+  try{
+    const r = await api('/api/storage/clean', {});
+    toast(`清掉 ${r.deleted} 个，释放 ${r.freed}`);
+    await loadStorage();
+  }catch(e){ toast('清理失败：'+e.message); }
+};
+
+/* 自测：用 ?selftest=1 打开，自动跑一遍弹层、接口、提示，把结果写进页面
+   这样不用手点也能确认链路通不通 */
+async function runSelftest(){
+  const out = [];
+  try{
+    const p = ask('自测：确认框能弹出来吗', '好的');
+    await new Promise(r=>setTimeout(r, 400));
+    const box = document.querySelector('.askbox');
+    out.push('弹层=' + (box ? '出现' : '没出现'));
+    const yes = document.querySelector('.askmask .askbar .btn:last-child');
+    if(yes) yes.click();
+    out.push('返回=' + await p);
+  }catch(e){ out.push('弹层异常=' + e.message); }
+  try{
+    const r = await api('/api/state');
+    out.push('接口=' + ((r && r.items) ? '正常' + r.items.length + '条' : '异常'));
+  }catch(e){ out.push('接口异常=' + e.message); }
+  try{
+    toast('自测');
+    out.push('提示=' + ($('toast').classList.contains('on') ? '显示' : '没显示'));
+  }catch(e){ out.push('提示异常=' + e.message); }
+  try{
+    const n = VIEW.length;
+    $('pickAll').checked = true;
+    $('pickAll').dispatchEvent(new Event('change'));
+    out.push(`全选=${SEL.size}/${n}` + (SEL.size === n && n > 0 ? '通' : '不通'));
+    out.push('按钮=' + ($('btnApply').classList.contains('disabled') ? '仍灰' : '已亮'));
+    $('btnDeselect').click();
+    out.push('取消=' + (SEL.size === 0 ? '通' : '剩' + SEL.size));
+  }catch(e){ out.push('全选异常=' + e.message); }
+  try{
+    const before = VIEW.length;
+    $('q').value = '会';
+    $('q').dispatchEvent(new Event('input'));
+    const hit = VIEW.length;
+    out.push(`搜索=命中${hit}/${before}`);
+    $('q').value = '';
+    $('q').dispatchEvent(new Event('input'));
+    out.push('清空=' + (VIEW.length === before ? '通' : '异常' + VIEW.length));
+  }catch(e){ out.push('搜索异常=' + e.message); }
+  out.push('错误栏=' + ($('errbar') ? '在' : '缺失'));
+  try{
+    const vw = document.documentElement.clientWidth;
+    out.push(`视口=${vw} 页面=${document.body.scrollWidth}`);
+    const over = [...document.querySelectorAll('body *')].filter(el=>{
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.right > vw + 1;
+    }).slice(0, 4).map(el=>{
+      const r = el.getBoundingClientRect();
+      const cls = (el.className || '').toString().split(' ')[0];
+      return `${el.tagName.toLowerCase()}${cls?'.'+cls:''}@${Math.round(r.right)}`;
+    });
+    out.push('溢出=' + (over.length ? over.join(',') : '无'));
+  }catch(e){ out.push('溢出检测异常=' + e.message); }
+  try{
+    const tw = document.querySelector('.tblwrap');
+    const th0 = document.querySelector('thead th');
+    out.push('表头position=' + getComputedStyle(th0).position);
+    const y0 = Math.round(th0.getBoundingClientRect().top);
+    window.scrollTo(0, 500);
+    const y1 = Math.round(th0.getBoundingClientRect().top);
+    window.scrollTo(0, 0);
+    // 滚动 500 后表头还贴在视口顶（y 接近 0），才算真粘住
+    out.push(`滚动前y=${y0} 滚动后y=${y1}` + (y1 >= 0 && y1 < 40 ? ' 粘住' : ' 没粘住'));
+    // 找出挡住 sticky 的祖先：任何一个 overflow 不为 visible 的元素都会剥夺它的参照物
+    let el = th0.parentElement, chain = [];
+    while(el && el !== document.documentElement){
+      const cs = getComputedStyle(el);
+      if(cs.overflow !== 'visible' || cs.overflowX !== 'visible'){
+        chain.push(`${el.tagName.toLowerCase()}.${(el.className||'').toString().split(' ')[0]}=${cs.overflow}/${cs.overflowX}`);
+      }
+      el = el.parentElement;
+    }
+    out.push('拦路=' + (chain.join(' ') || '无'));
+  }catch(e){ out.push('表头检测异常=' + e.message); }
+  out.push('页面错误=' + ($('errbar').classList.contains('on') ? '有（见上方红条）' : '无'));
+  const d = document.createElement('div');
+  d.id = 'selftest';
+  d.textContent = out.join(' ｜ ');
+  document.body.appendChild(d);
+}
+
+load().catch(e=>{
+  $('dbpath').textContent = '读取失败：' + e.message;
+  toast('读取失败：'+e.message);
+}).finally(()=>{
+  // 支持直接打开某个面板，方便收藏和分享
+  const q = new URLSearchParams(location.search);
+  const s = q.get('sheet');
+  const f = q.get('filter');
+  if(f){ FILTER = f; renderFilters(); renderTable(); updateBar(); }
+  if(s === 'ai' || q.get('ai') === '1'){ $('aiPanel').classList.add('on'); loadConfig(); }
+  if(s === 'move') setTimeout(()=>{
+    VIEW.slice(0, 3).forEach(x=>SEL.add(x.id));
+    renderTable(); updateBar();
+    $('btnMoveSel').click();
+    setTimeout(()=>{
+      // 演示两种去向：整批设一次，再单独改中间那条，用来验证「一条一个目标」
+      const demo = 'D:\\Projects\\演示站点';
+      $('moveTarget').value = demo;
+      bulkSet(demo);
+      if(MROWS[1]){
+        MROWS[1].to = 'D:\\Projects\\素材仓库';
+        resetRow(MROWS[1]);
+        renderMoveRows();
+      }
+      $('btnMoveCheck').click();
+    }, 350);
+  }, 300);
+  if(s === 'maint') setTimeout(()=>$('btnMaint').click(), 400);
+  if(s === 'trash') setTimeout(()=>$('btnTrash').click(), 400);
+  if(s === 'ws') setTimeout(()=>$('btnWs').click(), 400);
+  if(q.get('selftest') === '1') setTimeout(runSelftest, 500);
+});
+</script>
+</body>
+</html>

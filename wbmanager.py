@@ -1,0 +1,2198 @@
+"""wb-manager：WorkBuddy 会话管理器（独立工具，不依赖插件）。
+
+直接读写 WorkBuddy 的数据库，能干对话里干不了的事：批量改标题、搬目录、归档。
+
+启动：
+    python wbmanager.py            # 起服务并自动开浏览器
+    python wbmanager.py --port 8766
+    python wbmanager.py --no-browser
+
+安全：
+    只监听 127.0.0.1，外网访问不到。
+    每次写操作前自动拍快照到 backups/，可一键还原。
+    只改 custom_title 和 cwd 两个字段，不碰会话内容。
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+
+HERE = Path(__file__).resolve().parent
+IS_WIN = sys.platform.startswith("win")
+UI = HERE / "ui.html"
+BACKUPS = HERE / "backups"
+NAMING = HERE / "naming"
+HISTORY = HERE / "history.jsonl"
+HISTORY_KEEP = 200          # 只保留最近这些条，文件不会无限长
+CONFIG = HERE / "config.json"
+
+sys.path.insert(0, str(HERE))
+import rules  # noqa: E402
+
+MAX_BACKUPS = 20
+
+# WorkBuddy 用环境变量覆盖配置目录，优先级与程序本体一致。
+# 见 app.asar：configDirOverride || WORKBUDDY_CONFIG_DIR || CODEBUDDY_CONFIG_DIR || ~/.workbuddy
+CONFIG_ENVS = ("WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR")
+
+
+def resolve_config_dir():
+    """返回 (配置目录, 命中来源说明)。
+
+    按 WorkBuddy 自己的查找顺序走，这样用户把数据放哪都能找到。
+    环境变量指向的目录不存在时不采用——但要告诉用户一声，
+    否则静默回退到 ~/.workbuddy，用户会以为读的就是自己指定的那份。
+    """
+    skipped = []
+    for env in CONFIG_ENVS:
+        v = (os.environ.get(env) or "").strip()
+        if not v:
+            continue
+        if Path(v).is_dir():
+            return Path(v), f"环境变量 {env}"
+        skipped.append(f"{env}={v}（目录不存在，已忽略）")
+    if skipped:
+        print("[db] 注意：以下环境变量指向的目录不存在，已忽略：")
+        for s in skipped:
+            print(f"     {s}")
+    home_dir = Path.home() / ".workbuddy"
+    if home_dir.is_dir():
+        return home_dir, "用户目录 ~/.workbuddy"
+    return home_dir, "用户目录 ~/.workbuddy（尚未创建）"
+
+
+def resolve_db(cli_db=None):
+    """返回 (数据库路径, 说明)。找不到就返回预期位置，让调用方报错。"""
+    if cli_db:
+        return Path(cli_db).expanduser(), "命令行 --db"
+    v = (os.environ.get("WORKBUDDY_DB") or "").strip()
+    if v:
+        return Path(v).expanduser(), "环境变量 WORKBUDDY_DB"
+    cfg, why = resolve_config_dir()
+    return cfg / "workbuddy.db", why
+
+
+REAL_DB, DB_SOURCE = resolve_db()
+
+
+# ---------- 数据层 ----------
+
+def connect(write=False):
+    """打开数据库。
+
+    读用普通连接 + PRAGMA query_only，比 URI 的 mode=ro 稳，
+    在 Windows 上 URI 带盘符容易踩坑。
+    """
+    con = sqlite3.connect(REAL_DB, timeout=10)
+    con.row_factory = sqlite3.Row
+    if not write:
+        con.execute("PRAGMA query_only=ON")
+    return con
+
+
+ACTIVE_WINDOW = 180  # 正文文件 3 分钟内还在写，就认为正在使用
+
+
+def _is_active(row, now, file_of):
+    """这条会话是不是正被使用。两种迹象：
+
+    1) status 是 working —— WorkBuddy 自己标的运行中
+    2) 正文文件 3 分钟内还在被写 —— 你正在这个会话里说话
+
+    搬动正在写的会话会把历史切成两截，上次事故就是这么来的，
+    所以界面上要显眼标出来。
+    """
+    if (row.get("status") or "").lower() == "working":
+        return "running"
+    try:
+        f = file_of(row.get("cwd"), row["id"])
+        if f.exists() and (now - f.stat().st_mtime) < ACTIVE_WINDOW:
+            return "recent"
+    except OSError:
+        pass
+    return ""
+
+
+def load_sessions():
+    con = connect()
+    rows = [dict(r) for r in con.execute("""
+        SELECT id, cwd, title, custom_title, status, created_at, updated_at,
+               is_background_automation, is_playground, deleted_at
+        FROM sessions
+        WHERE deleted_at IS NULL
+        ORDER BY updated_at DESC
+    """).fetchall()]
+    con.close()
+
+    out = []
+    ai_titles = load_naming()
+    naming_style = (load_config().get("style") or "emoji")
+    rules.set_custom_rules(load_config().get("custom_types") or [])
+    # 判断「正在使用」要看正文文件多久没动，同一个目录只查一次，别每条都遍历 projects
+    now = time.time()
+    _dir_cache = {}
+
+    def _session_file(cwd, sid):
+        key = rules.norm_path(cwd or "").lower()
+        if key not in _dir_cache:
+            _dir_cache[key] = find_esc_dir(cwd)
+        return _dir_cache[key] / f"{sid}.jsonl"
+
+    for r in rows:
+        cur = (r["custom_title"] or "").strip()
+        raw = (r["title"] or "").strip()
+        s = rules.suggest(r, style=naming_style)
+        after = s["after"]
+        source = "rule"
+        why = s["why"]
+        if r["id"] in ai_titles:
+            after = ai_titles[r["id"]]
+            source = "ai"
+            why = "AI 读过对话内容，按实际做的事命名"
+        elif s["conflict"] and cur:
+            # 自己起过名、规则没认出类型：不再是「待确认」，改成如实说明
+            why = "名字是你自己定的；规则只是认不出该归哪个类型，不影响使用"
+        out.append({
+            "id": r["id"],
+            "cwd": r["cwd"] or "",
+            "cwd_norm": rules.norm_path(r["cwd"] or ""),
+            "dir": rules.tail_dir(r["cwd"]),
+            "current": cur or raw,
+            "raw": raw[:120],
+            "has_custom": bool(cur),
+            "suggest": after,
+            "source": source,
+            "emoji": s["emoji"],
+            "type": s["type_name"],
+            "why": why,
+            # 需确认只留给「从来没起过名、且规则没认出」的会话。
+            # 用户自己改过名的（custom_title 非空）说明人家已经定了性，
+            # 规则认不出类型 ≠ 还需要确认，不该天天挂着催。
+            "conflict": s["conflict"] and source == "rule" and not cur,
+            "auto": bool(r["is_background_automation"]),
+            "archived": (r["status"] or "").lower() == "archived",
+            "active": _is_active(r, now, _session_file),
+            "status": r["status"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            # 用户自己改过名的（has_custom）不算「待改」——那是人家定的名字，
+            # 工具不该天天催着改；只有没起过名、又不合规的才进待改清单
+            "changed": (not cur) and after != raw,
+        })
+    return out
+
+
+def stats(items):
+    groups = {}
+    dup = {}
+    for i in items:
+        groups.setdefault(i["cwd_norm"], 0)
+        groups[i["cwd_norm"]] += 1
+        dup.setdefault(i["current"], 0)
+        dup[i["current"]] += 1
+
+    dup_groups = {k: v for k, v in dup.items() if v > 1}
+    return {
+        "total": len(items),
+        "auto": sum(1 for i in items if i["auto"]),
+        "manual": sum(1 for i in items if not i["auto"]),
+        "archived": sum(1 for i in items if i["archived"]),
+        "need_change": sum(1 for i in items if i["changed"] and not i["archived"]),
+        "conflict": sum(1 for i in items if i["conflict"] and not i["archived"]),
+        "groups": len(groups),
+        "dup_groups": len(dup_groups),
+        "dup_extra": sum(v - 1 for v in dup_groups.values()),
+        "dup_detail": sorted(
+            [{"title": k, "count": v} for k, v in dup_groups.items()],
+            key=lambda x: -x["count"])[:10],
+    }
+
+
+# ---------- 备份 ----------
+
+def snapshot(tag="manual"):
+    """把全部会话的标题、目录、状态存成 json 快照。
+
+    带 status 是为了归档能还原——归档改的就是 status，
+    恢复时得知道原来是 completed 还是 working。
+    """
+    BACKUPS.mkdir(exist_ok=True)
+    con = connect()
+    rows = [dict(r) for r in con.execute(
+        "SELECT id, custom_title, title, cwd, status FROM sessions").fetchall()]
+    con.close()
+    # 文件名精确到毫秒：同一秒内连着两次操作（比如「归类」后立刻「撤回」）
+    # 会撞同名，后一份把前一份覆盖掉，撤回就退错地方。
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+    name = f"snap-{stamp}-{tag}.json"
+    p = BACKUPS / name
+    p.write_text(json.dumps({
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "tag": tag,
+        "count": len(rows),
+        "rows": rows,
+    }, ensure_ascii=False), encoding="utf-8")
+
+    # 只留最近 N 份
+    olds = sorted(BACKUPS.glob("snap-*.json"))
+    for f in olds[:-MAX_BACKUPS]:
+        f.unlink()
+    return p.name
+
+
+def undo_snapshot(name):
+    """撤回某一步操作。
+
+    关键差别：改标题、归档只要改数据库；但归类改的是 cwd，
+    光把 cwd 改回去而磁盘文件不动，会话就点不开了——WorkBuddy 是按
+    projects/<目录名>/<会话id>.jsonl 找正文的。
+
+    所以这里先算目录差异、把文件反向搬回去，再套用快照里的其余字段。
+    """
+    p = BACKUPS / name
+    if not p.exists():
+        return {"error": "这份快照已经被新的备份挤掉了，撤不回来"}
+
+    d = json.loads(p.read_text(encoding="utf-8"))
+    want = {r["id"]: r for r in d.get("rows") or []}
+
+    con = connect()
+    now = {r["id"]: dict(r) for r in con.execute(
+        "SELECT id, cwd FROM sessions").fetchall()}
+    con.close()
+
+    back = []
+    for sid, old in want.items():
+        cur = now.get(sid)
+        if not cur:
+            continue
+        if rules.norm_path(cur["cwd"] or "") != rules.norm_path(old.get("cwd") or ""):
+            back.append({"id": sid, "cwd": old.get("cwd")})
+
+    moved = 0
+    blocked = []
+    if back:
+        if not IS_WIN:
+            return {"error": "撤回归类要搬动磁盘文件，这个功能只在 Windows 上可用"}
+        r = move_sessions(back)
+        if r.get("error"):
+            return {"error": r["error"]}
+        moved = r.get("changed", 0)
+        blocked = r.get("blocked") or []
+
+    rest = restore(name)
+    rest["moved_files"] = moved
+    if blocked:
+        rest["blocked"] = blocked
+    return rest
+
+
+# WorkBuddy 自动建的目录长这样：时间戳、automation- 开头、纯数字。
+# 这些不是你起的项目名，所以里面的会话算「散着」。
+LOOSE_PAT = re.compile(r"^(?:\d{4}-\d{2}-\d{2}(?:-\d{2}-\d{2}-\d{2})?|automation-.*|\d{10,})$")
+
+
+def plan_rehome(create_root=None):
+    """把散落在自动生成目录里的会话挑出来，给每条一个建议去处。
+
+    判定「散落」只看目录名，别的不猜。建议去处也只走明摆着的线索：
+    标题里出现了某个现有项目的名字，就去那个项目；认不出的空着让你自己点，
+    绝不瞎猜——猜错了搬来搬去，比不搬更麻烦。
+
+    目标目录不存在时，会在推荐的位置建，而不是往 C 盘塞。
+    """
+    items = [i for i in load_sessions() if not i["archived"]]
+
+    known = {}
+    for i in items:
+        d = i["dir"]
+        if d and not LOOSE_PAT.match(d):
+            known.setdefault(d, i["cwd"])
+
+    if not create_root:
+        # 新项目该建在专门的项目目录里，不是建在默认空间。
+        # 项目根位置 = 现有项目目录最常见的那个父目录；一个项目都没有时退回扫盘建议。
+        import collections
+        parents = collections.Counter(str(Path(p).parent) for p in known.values() if p)
+        if parents:
+            create_root = parents.most_common(1)[0][0]
+        else:
+            try:
+                create_root = str(Path(scan_disks()["suggest_root"]))
+            except Exception:  # noqa: BLE001
+                create_root = ""
+
+    rows = []
+    for i in items:
+        d = i["dir"] or ""
+        if not LOOSE_PAT.match(d):
+            continue
+        sug, why = "", "认不出属于哪个项目，你来点"
+        for name, path in known.items():
+            if name and name in (i["current"] or ""):
+                sug, why = path, f"标题里有「{name}」"
+                break
+        rows.append({
+            "id": i["id"],
+            "title": i["current"],
+            "from": i["cwd"],
+            "from_dir": d,
+            "suggest": sug,
+            "why": why,
+            "active": bool(i.get("active")),
+        })
+
+    rows.sort(key=lambda x: (x["from_dir"], x["title"]))
+    return {
+        "items": rows,
+        "count": len(rows),
+        "known_projects": [{"name": k, "path": v} for k, v in sorted(known.items())],
+        "create_root": create_root,
+        "root_exists": bool(create_root) and Path(create_root).is_dir(),
+    }
+
+
+def _is_link(p):
+    """这个目录是不是联接/软链。Windows 上用 junction 挪数据很常见。"""
+    p = Path(p)
+    try:
+        if not p.exists():
+            return False
+        if p.is_symlink():
+            return True
+        checker = getattr(p, "is_junction", None)
+        if callable(checker):
+            return bool(checker())
+        # 老版本 Python 没有 is_junction，退而求其次比真实路径
+        return os.path.realpath(str(p)).lower() != str(p).lower()
+    except OSError:
+        return False
+
+
+def migration_status():
+    """看 WorkBuddy 的数据放在哪，落在 C 盘就给出迁移建议。
+
+    要分清楚两块东西，它们不是一回事：
+    - 配置目录（.workbuddy）：数据库、projects 里的对话正文、技能、记忆
+    - 默认工作空间（同级的 WorkBuddy）：开对话时自动建的文件夹
+
+    两块都可能落在 C 盘。落 C 盘的问题不是「不能用」，是系统盘紧张时
+    容易被清理工具碰到，而且每次读写都要过一遍用户目录。
+
+    这里只做检测和引导，不自动搬——搬错一个链接，WorkBuddy 会直接打不开。
+    """
+    cfg = REAL_DB.parent
+    ws = _ws_root()
+
+    def info(p):
+        p = Path(p)
+        exists = p.exists()
+        return {
+            "path": str(p),
+            "exists": exists,
+            "on_system_drive": str(p).upper().startswith("C:"),
+            "is_link": _is_link(p) if exists else False,
+            "real_path": os.path.realpath(str(p)) if exists else "",
+        }
+
+    c, w = info(cfg), info(ws)
+
+    # 还要看「标准位置」——也就是 WorkBuddy 默认会用的 %USERPROFILE%\.workbuddy。
+    # 很多人（包括本机）用 junction 把它指到别的盘，但设置界面里显示的仍是 C 盘路径。
+    std = Path.home() / ".workbuddy"
+    s = info(std)
+    same = False
+    try:
+        if std.exists() and Path(cfg).exists():
+            same = os.path.realpath(str(std)).lower() == os.path.realpath(str(cfg)).lower()
+    except OSError:
+        pass
+    s["points_to_current"] = same
+
+    need = []
+    if c["on_system_drive"] and not c["is_link"]:
+        need.append("config")
+    if w["exists"] and w["on_system_drive"] and not w["is_link"]:
+        need.append("workspace")
+
+    # 已经用联接挪走了但显示还是 C 盘的，单独说清楚：数据其实不在 C 盘
+    link_only = bool(s["exists"] and s["is_link"] and same)
+
+    return {
+        "config": c,
+        "workspace": w,
+        "standard": s,
+        "need_migrate": need,
+        "ok": not need,
+        "linked_but_shows_c": link_only,
+        "hint": ("数据都在系统盘以外，或者已经用链接指到别的盘了，不用动。"
+                 if not need else
+                 "有数据还在 C 盘，下面有挪走的做法。挪之前务必完全退出 WorkBuddy。"),
+    }
+
+
+def scan_disks():
+    """扫一遍本机磁盘，挑一个适合放工作空间的位置。
+
+    判断依据只有三条，别的不猜：
+    1) 可用空间（要放回忆录级别的会话，太小没意义）
+    2) 是不是系统盘（C 盘放着容易出事，能挪就挪）
+    3) 这个盘上有没有现成的 AI 工作目录（有的话放在一起，侧栏不会散）
+    """
+    import string
+    out = []
+    for ch in string.ascii_uppercase:
+        root = Path(f"{ch}:\\")
+        try:
+            if not root.exists():
+                continue
+            du = shutil.disk_usage(str(root))
+        except OSError:
+            continue
+
+        free_gb = du.free / (1024 ** 3)
+        total_gb = du.total / (1024 ** 3)
+        is_sys = (ch.upper() == "C")
+
+        # 有没有现成的工作目录，以及上面是否已经有 WorkBuddy 工作空间
+        # 只看这些目录下面的 WorkBuddy，不扫盘根的——盘根那个多半是程序安装目录
+        hints = []
+        existing_ws = []
+        for n in ("WorkBuddy", "AI", "AI-Work"):
+            p = root / n
+            try:
+                if not p.is_dir():
+                    continue
+            except OSError:
+                continue
+            hints.append(str(p))
+            w = p / "WorkBuddy"
+            try:
+                # 盘上那个 WorkBuddy 可能是程序安装目录，不是工作空间。
+                # 认一下：有 electron 许可文件或 exe 的是程序，跳过。
+                if w.is_dir() and not any(
+                        (w / m).exists() for m in
+                        ("LICENSE.electron.txt", "WorkBuddy.exe", "resources/app.asar")):
+                    existing_ws.append(str(w))
+            except OSError:
+                pass
+
+        score = 0
+        if not is_sys:
+            score += 40
+        if free_gb >= 100:
+            score += 30
+        elif free_gb >= 50:
+            score += 22
+        elif free_gb >= 20:
+            score += 14
+        elif free_gb >= 5:
+            score += 6
+        if hints:
+            score += 25
+        if existing_ws:
+            score += 30          # 已经有现成工作空间的盘，优先选它，别让人再挪一次
+
+        out.append({
+            "drive": f"{ch.upper()}:",
+            "free_gb": round(free_gb, 1),
+            "total_gb": round(total_gb, 1),
+            "is_system": is_sys,
+            "hints": hints,
+            "existing_ws": existing_ws,
+            "score": score,
+        })
+
+    out.sort(key=lambda x: -x["score"])
+    best = out[0] if out else None
+
+    # 推荐逻辑：正在用的位置如果已经不在系统盘，就别让人再挪一次；
+    # 只有落在 C 盘（或还没有）时，才给一个更好的盘。
+    cur = _ws_root()
+    cur_on_sys = str(cur).upper().startswith("C:")
+    suggest = ""
+    if cur.is_dir() and not cur_on_sys:
+        suggest = str(cur)
+    elif best:
+        if best["existing_ws"]:
+            suggest = best["existing_ws"][0]
+        elif best["hints"]:
+            suggest = str(Path(best["hints"][0]) / "WorkBuddy")
+        else:
+            # 没有任何现成目录：推荐盘根下建一个 WorkBuddy 工作空间
+            # （WorkBuddy 的默认工作空间名就叫 WorkBuddy，对所有用户一致）
+            suggest = f"{best['drive']}\\WorkBuddy"
+
+    return {"drives": out, "best": best, "suggest_root": suggest,
+            "current_root": str(cur),
+            "current_on_system_drive": cur_on_sys}
+
+
+WORKSPACE_ROOT_NAMES = ("memory.md", "MEMORY.md", "USER.md", "SOUL.md", "IDENTITY.md")
+
+
+def _ws_root():
+    """默认工作空间：配置目录的父目录下的 WorkBuddy。
+
+    WorkBuddy 没把「默认工作目录」存进配置，是推导出来的：
+    配置目录（.workbuddy）的上一级 + WorkBuddy。所以搬家挪盘之后这里会跟着变。
+    """
+    return REAL_DB.parent.parent / "WorkBuddy"
+
+
+def scan_workspaces():
+    """扫默认工作空间里的各个文件夹，判断哪些是闲置的。
+
+    最关键的一条：里面有 memory.md 就不能删——那是 AI 的记忆，
+    删了等于把你在那个工作空间里养出来的东西清空。
+    所以这里只允许删「完全空」的，其余只报告。
+
+    判定的四种状态：
+    - inuse  还有存活会话在用它，动都不能动
+    - memory 留着记忆文件，要处理也先迁走再删
+    - files  留着其他文件，得自己看一眼
+    - empty  空的，可以清
+    """
+    root = _ws_root()
+    if not root.is_dir():
+        return {"root": str(root), "exists": False, "items": [],
+                "total": 0, "cleanable": 0, "total_size": 0}
+
+    con = connect()
+    used = {}
+    for r in con.execute("""SELECT cwd, COUNT(*) c FROM sessions
+                            WHERE deleted_at IS NULL GROUP BY cwd"""):
+        used[rules.norm_path(r["cwd"] or "").lower()] = r["c"]
+    con.close()
+
+    items = []
+    total_size = 0
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        key = rules.norm_path(str(d)).lower()
+        n_sess = used.get(key, 0)
+
+        files = []
+        for p in d.rglob("*"):
+            try:
+                if p.is_file() and p.name.lower() != "nul":
+                    files.append(p)
+            except OSError:
+                continue
+        size = sum(p.stat().st_size for p in files)
+        total_size += size
+
+        mems = [p for p in files if p.name in WORKSPACE_ROOT_NAMES]
+        others = [p for p in files if p.name not in WORKSPACE_ROOT_NAMES]
+
+        if n_sess:
+            state, why = "inuse", f"还有 {n_sess} 条会话放在这"
+        elif mems:
+            state, why = "memory", f"留着 {len(mems)} 个记忆文件"
+        elif others:
+            state, why = "files", f"留着 {len(others)} 个文件"
+        else:
+            state, why = "empty", "空的"
+
+        items.append({
+            "name": d.name,
+            "path": str(d),
+            "sessions": n_sess,
+            "files": len(files),
+            "size": size,
+            "size_h": human_size(size),
+            "memory_files": [p.name for p in mems],
+            "other_files": [p.name for p in others[:6]],
+            "state": state,
+            "why": why,
+            "cleanable": state == "empty",
+        })
+
+    order = {"inuse": 0, "memory": 1, "files": 2, "empty": 3}
+    items.sort(key=lambda x: (order.get(x["state"], 9), -x["size"]))
+    return {
+        "root": str(root),
+        "exists": True,
+        "items": items,
+        "total": len(items),
+        "cleanable": sum(1 for x in items if x["cleanable"]),
+        "total_size": total_size,
+        "total_size_h": human_size(total_size),
+    }
+
+
+def clean_workspaces(paths):
+    """清掉闲置的工作空间文件夹。
+
+    只做一件事：删完全空的目录。有任何文件就整体拒绝，不递归删内容——
+    这个工具不负责判断哪个文件重要。
+    """
+    paths = [p for p in (paths or []) if p]
+    if not paths:
+        return {"error": "没有选中要清理的文件夹", "removed": 0}
+
+    root = _ws_root().resolve()
+    removed, blocked = [], []
+    for raw in paths:
+        try:
+            d = Path(raw).resolve()
+        except OSError as e:
+            blocked.append({"path": raw, "why": f"路径不可用：{e}"})
+            continue
+
+        # 只能在默认工作空间里动，别的地方一律不碰
+        try:
+            d.relative_to(root)
+        except ValueError:
+            blocked.append({"path": raw, "why": "不在默认工作空间里，不处理"})
+            continue
+        if d == root:
+            blocked.append({"path": raw, "why": "这是工作空间根目录，不能删"})
+            continue
+        if not d.is_dir():
+            blocked.append({"path": raw, "why": "文件夹已经不存在"})
+            continue
+
+        left = [p for p in d.iterdir()]
+        # Windows 上目录里偶尔有个名叫 nul 的幽灵文件，stat 都会失败，
+        # 按名字排除掉，否则任何目录都「还有内容」
+        real = [p for p in left if p.name.lower() != "nul"]
+        if real:
+            blocked.append({"path": raw,
+                            "why": f"里面还有 {len(real)} 项内容，不删（要删请自己处理）"})
+            continue
+        try:
+            for p in left:
+                if p.name.lower() != "nul":
+                    continue
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            d.rmdir()
+            removed.append(d.name)
+        except OSError as e:
+            blocked.append({"path": raw, "why": f"删不掉：{e}"})
+
+    if removed:
+        log_action("清理闲置工作空间", len(removed), None,
+                   "、".join(removed[:5]) + ("…" if len(removed) > 5 else ""))
+    return {"removed": len(removed), "names": removed, "blocked": blocked}
+
+
+def read_workspace_memory(path):
+    """只读地看一眼某个闲置空间里养出来的记忆（memory.md 原文）。
+
+    给「这个日期名字的文件夹到底是什么任务」提供判断依据，
+    看完可以决定改名或留着，这里不写不删。
+    """
+    try:
+        d = Path(path).resolve()
+        root = _ws_root().resolve()
+        d.relative_to(root)
+    except (OSError, ValueError):
+        return {"error": "只能看默认工作空间里的文件夹"}
+    if not d.is_dir():
+        return {"error": "文件夹不存在"}
+    mems = [p for p in d.rglob("*") if p.is_file() and p.name in WORKSPACE_ROOT_NAMES]
+    if not mems:
+        return {"error": "这个文件夹里没有记忆文件"}
+    out = []
+    for m in mems[:3]:
+        try:
+            text = m.read_text(encoding="utf-8", errors="replace")
+            out.append({"file": m.name, "chars": len(text),
+                        "head": text[:1200], "truncated": len(text) > 1200})
+        except OSError as e:
+            out.append({"file": m.name, "error": str(e)})
+    return {"items": out}
+
+
+def log_action(action, changed, snapshot=None, note=""):
+    """记一条写操作，供「操作历史」查看和撤回。
+
+    只追加、不改旧记录。改坏了最怕「不知道刚才动了什么」，
+    这条日志配上当时的快照名，就能原路退回去。
+    """
+    rec = {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": int(time.time()),
+        "action": action,
+        "changed": int(changed or 0),
+        "snapshot": snapshot,
+        "note": note or "",
+    }
+    try:
+        with open(HISTORY, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        _trim_history()
+    except OSError:
+        pass
+    return rec
+
+
+def _trim_history():
+    """日志只留最近 HISTORY_KEEP 条，避免越攒越大。"""
+    try:
+        lines = HISTORY.read_text(encoding="utf-8").splitlines()
+        if len(lines) <= HISTORY_KEEP:
+            return
+        keep = lines[-HISTORY_KEEP:]
+        HISTORY.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def list_history(limit=30):
+    if not HISTORY.exists():
+        return {"items": [], "count": 0}
+    rows = []
+    try:
+        for line in HISTORY.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        return {"items": [], "count": 0}
+    rows.reverse()
+    # 标出哪条还能撤回：快照文件还在的才行
+    for r in rows[:limit]:
+        snap = r.get("snapshot")
+        r["can_undo"] = bool(snap and (BACKUPS / snap).exists())
+    return {"items": rows[:limit], "count": len(rows)}
+
+
+def list_backups():
+    BACKUPS.mkdir(exist_ok=True)
+    out = []
+    for f in sorted(BACKUPS.glob("snap-*.json"), reverse=True):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            out.append({"name": f.name, "at": d.get("at"), "tag": d.get("tag"),
+                        "count": d.get("count"), "size": f.stat().st_size})
+        except (ValueError, OSError):
+            continue
+    return out
+
+
+def delete_backup(name):
+    """手动删一份快照。快照只是「撤回用的存档」，删掉不影响会话数据本身，
+    损失的只是那一步撤不回。只认文件名里的 snap-*.json，防路径穿越。"""
+    name = Path(name).name
+    if not (name.startswith("snap-") and name.endswith(".json")):
+        return {"error": "只允许删本工具生成的 snap-*.json 快照"}
+    p = BACKUPS / name
+    if not p.exists():
+        return {"error": "快照不存在（可能已被新的备份挤掉）"}
+    p.unlink()
+    return {"ok": True, "left": len(list_backups())}
+
+
+# ---------- 写操作 ----------
+
+def apply_titles(pairs):
+    """pairs: [{id, title}]。只改 custom_title，不动其他字段。"""
+    if not pairs:
+        return {"changed": 0, "snapshot": None}
+    snap = snapshot("before-apply")
+    con = connect(write=True)
+    changed = 0
+    try:
+        with con:
+            for p in pairs:
+                t = (p.get("title") or "").strip()[:200]
+                if not t or not p.get("id"):
+                    continue
+                cur = con.execute("SELECT custom_title FROM sessions WHERE id=?",
+                                  (p["id"],)).fetchone()
+                if cur is None or (cur["custom_title"] or "") == t:
+                    continue
+                con.execute("UPDATE sessions SET custom_title=? WHERE id=?", (t, p["id"]))
+                changed += 1
+    finally:
+        con.close()
+    log_action("改标题", changed, snap, f"{len(pairs)} 条提交")
+    return {"changed": changed, "snapshot": snap}
+
+
+def esc_dir_name(cwd):
+    """把 cwd 转成 WorkBuddy 的 projects 子目录名。
+
+    实测规则（仅 Windows）：F:\\AI\\x -> F-AI-x
+    （盘符后的 :\\ 合成一个减号，其余 \\ 各变减号）
+    本机 98 条会话全部符合这个规则，无一例外。
+
+    ⚠️ macOS / Linux 上的规则没有验证过。Unix 路径本身以 / 开头，
+    首字符会变成减号，实际 WorkBuddy 怎么处理未知。
+    所以非 Windows 平台上搬目录是被禁掉的（见 preview_move），
+    只保留改标题、归档这些不碰路径的操作。
+    """
+    p = rules.norm_path(cwd or "")
+    if not IS_WIN:
+        # Unix 路径：把 / 变成 -，去掉开头的减号
+        return re.sub(r"[\\/]", "-", p).lstrip("-")
+    p = re.sub(r":\\", "-", p)
+    return re.sub(r"[\\/]", "-", p)
+
+
+def session_file(sid, cwd):
+    """会话正文文件路径：<配置目录>/projects/<转义cwd>/<会话id>.jsonl"""
+    cfg = REAL_DB.parent
+    return cfg / "projects" / esc_dir_name(cwd) / f"{sid}.jsonl"
+
+
+def wb_running():
+    """WorkBuddy 是否在跑。
+
+    踩过坑：tasklist 的输出是 GBK，用 text=True 解码会抛 UnicodeDecodeError，
+    异常被吞掉后这里恒返回 False，防护等于没有。所以按 bytes 比，不解码。
+    macOS / Linux 没有 tasklist，改用 pgrep。
+    """
+    try:
+        if IS_WIN:
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq WorkBuddy.exe", "/NH"],
+                                 capture_output=True, timeout=8)
+            return b"workbuddy" in (out.stdout or b"").lower()
+        out = subprocess.run(["pgrep", "-fi", "workbuddy"],
+                             capture_output=True, timeout=8)
+        return out.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def is_active(path, seconds=180):
+    """这条会话是不是正在被使用。
+
+    正在写会话时搬它的文件，等于在别人打字时拿走他的纸。
+    jsonl 三分钟内被改过就认为在用。
+    """
+    try:
+        return (time.time() - path.stat().st_mtime) < seconds
+    except OSError:
+        return False
+
+
+def find_esc_dir(cwd):
+    """按 WorkBuddy 的规则算目录名，并尽量复用磁盘上已存在的那个。
+
+    NTFS 不区分大小写但保留原样，所以 'F-AI-x' 和 'f-AI-x' 可能是同一个目录。
+    遍历一次 projects，忽略大小写找已存在的名字，避免凭空造出重复目录。
+    """
+    want = esc_dir_name(cwd)
+    proj = REAL_DB.parent / "projects"
+    try:
+        if proj.is_dir():
+            low = want.lower()
+            for child in proj.iterdir():
+                if child.is_dir() and child.name.lower() == low:
+                    return child
+    except OSError:
+        pass
+    return proj / want
+
+
+def export_naming(ids=None, include_auto=False):
+    """导出命名请求包：把每条会话的对话摘要攒成一个 json，交给模型读。
+
+    为什么不内置 AI：工具跑在本地，没有模型可用。把摘要导出、让 WorkBuddy
+    会话里的模型来命名，既零成本又比关键词规则准。导出只读会话文件，不改任何东西。
+    """
+    items = load_sessions()
+    picked = [i for i in items if i["id"] in ids] if ids else \
+             [i for i in items if include_auto or not i["auto"]]
+
+    req = []
+    for i in picked:
+        f = session_file(i["id"], i["cwd"])
+        d = rules.read_digest(f)
+        req.append({
+            "id": i["id"],
+            "current": i["current"],
+            "dir": i["dir"],
+            "cwd": i["cwd"],
+            "auto": i["auto"],
+            "ai_title": d["ai_title"],
+            "user_said": d["users"],
+            "tools": d["tools"][:10],
+            "rule_suggest": i["suggest"],
+            "rule_type": i["type"],
+        })
+
+    NAMING.mkdir(exist_ok=True)
+    name = f"request-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    p = NAMING / name
+    p.write_text(json.dumps({
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ask": "给每条会话起名，格式：<类型emoji> <主题>｜<这次做了什么>，"
+               "类型只能是 🛠️开发 🐛排查 🎬制作 📝文案 🔍调研 🗂️整理 💰事务 💬问答 🔁定时。"
+               "主题不超过 14 字，取这次真正干的事，不要照抄 user_said。"
+               "返回严格 JSON：{\"titles\":[{\"id\":\"...\",\"title\":\"...\"}]}",
+        "count": len(req),
+        "items": req,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    return {"file": str(p), "name": name, "count": len(req),
+            "items": req[:3]}
+
+
+def import_naming(payload):
+    """导入模型给出的命名结果，存成 latest.json，界面据此显示 AI 建议。
+
+    只存建议，不直接改库。要落到库里还得用户点应用。
+    """
+    titles = payload.get("titles") or []
+    if not isinstance(titles, list):
+        return {"error": "格式不对，需要 {\"titles\":[{\"id\",\"title\"}]}"}
+
+    clean = {}
+    for t in titles:
+        if not isinstance(t, dict):
+            continue
+        sid = (t.get("id") or "").strip()
+        title = re.sub(r"\s+", " ", (t.get("title") or "").strip())[:200]
+        if sid and title:
+            clean[sid] = title
+    if not clean:
+        return {"error": "没解析出任何有效标题"}
+
+    NAMING.mkdir(exist_ok=True)
+    (NAMING / "latest.json").write_text(json.dumps({
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "titles": clean,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    return {"imported": len(clean)}
+
+
+def load_naming():
+    p = NAMING / "latest.json"
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return d.get("titles") or {}
+    except (OSError, ValueError):
+        return {}
+
+
+KEEP_NAMING = 5
+
+DEFAULT_CFG = {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "api_key": "",
+    "batch": 20,
+    "style": "emoji",   # 命名风格模板：emoji / plain / date
+    "custom_types": [],  # 自定义类型规则：[{emoji,name,keys}]，界面可配
+}
+
+
+def load_config():
+    """读配置。没有就返回默认值，不写文件。"""
+    cfg = dict(DEFAULT_CFG)
+    if CONFIG.exists():
+        try:
+            cfg.update(json.loads(CONFIG.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+    return cfg
+
+
+def public_config():
+    """给界面看的配置。密钥只回掩码，不回明文。"""
+    cfg = load_config()
+    key = cfg.get("api_key") or ""
+    masked = (key[:4] + "…" + key[-4:]) if len(key) > 10 else ("已设置" if key else "")
+    return {"base_url": cfg["base_url"], "model": cfg["model"],
+            "batch": cfg.get("batch", 20),
+            "style": cfg.get("style", "emoji"),
+            "custom_types": cfg.get("custom_types", []),
+            "has_key": bool(key), "key_mask": masked}
+
+
+def save_config(payload):
+    """只接受已知字段。空字符串表示「不改」，避免误清空已存的 key。"""
+    cfg = load_config()
+    for k in ("base_url", "model"):
+        v = (payload.get(k) or "").strip()
+        if v:
+            cfg[k] = v
+    key = (payload.get("api_key") or "").strip()
+    if key and key != "***":
+        cfg["api_key"] = key
+    if payload.get("clear_key"):
+        cfg["api_key"] = ""
+    try:
+        cfg["batch"] = max(5, min(40, int(payload.get("batch") or cfg.get("batch", 20))))
+    except (TypeError, ValueError):
+        pass
+    if payload.get("style") in ("emoji", "plain", "date"):
+        cfg["style"] = payload["style"]
+    ct = payload.get("custom_types")
+    if isinstance(ct, list):
+        clean = []
+        for it in ct:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("name") or "").strip()
+            keys = [str(k).strip() for k in (it.get("keys") or []) if str(k).strip()]
+            if name and keys:
+                clean.append({"emoji": str(it.get("emoji") or "").strip() or "🏷️",
+                              "name": name, "keys": keys[:30]})
+        cfg["custom_types"] = clean[:50]
+    CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        os.chmod(CONFIG, 0o600)   # 只有本人可读，聊胜于无
+    except OSError:
+        pass
+    return public_config()
+
+
+NAMING_PROMPT = (
+    "你是给程序员整理工作记录的人。下面是一批 WorkBuddy 会话的摘要，"
+    "每条有：当前标题、所在目录、模型给过的旧标题、用户说过的话、用过的工具。\n\n"
+    "给每条重新起名，格式固定为：<类型emoji> <主题>｜<这次做了什么>\n"
+    "类型只能从这些里选一个：🛠️开发 🐛排查 🎬制作 📝文案 🔍调研 🗂️整理 💰事务 💬问答\n"
+    "要求：\n"
+    "1. 主题不超过 14 个字，写清「做的是什么东西」，不要抄用户的原话。\n"
+    "2. 竖线后面写「这件事进行到哪一步」或「这次的产出」，不超过 12 个字。\n"
+    "3. 信息不够就按目录和工具猜，别留空，别写「未知」。\n"
+    "4. 不输出任何解释，只返回 JSON。\n\n"
+    "返回格式：{\"titles\":[{\"id\":\"原样返回的id\",\"title\":\"起的名字\"}]}"
+)
+
+
+def call_llm(cfg, items):
+    """调一次模型，返回 (titles_dict, usage_dict)。失败抛异常。"""
+    body = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": NAMING_PROMPT},
+            {"role": "user", "content": json.dumps(
+                [{"id": i["id"], "当前标题": i["current"], "目录": i["dir"],
+                  "旧标题": i["ai_title"], "用户说过": i["user_said"][:3],
+                  "工具": i["tools"][:8]} for i in items],
+                ensure_ascii=False)},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    }
+    req = urllib.request.Request(
+        cfg["base_url"].rstrip("/") + "/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {cfg['api_key']}"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        d = json.loads(r.read().decode("utf-8"))
+
+    text = (d.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    # 模型有时会套 ```json，剥掉
+    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise ValueError("模型没返回 JSON")
+        parsed = json.loads(m.group(0))
+
+    titles = {}
+    for t in parsed.get("titles") or []:
+        if isinstance(t, dict) and t.get("id") and t.get("title"):
+            titles[t["id"]] = re.sub(r"\s+", " ", str(t["title"]).strip())[:200]
+    return titles, d.get("usage") or {}
+
+
+def naming_auto(ids=None):
+    """用 API 批量命名。没配 key 直接报错，让前端退回手动通道。"""
+    cfg = load_config()
+    if not cfg.get("api_key"):
+        return {"error": "还没配置 API key。要么填一个，要么用「导出命名请求」走手动。"}
+
+    items = load_sessions()
+    picked = [i for i in items if i["id"] in ids] if ids else [i for i in items if not i["auto"]]
+    if not picked:
+        return {"error": "没有需要命名的会话"}
+
+    # 把摘要凑齐
+    payload = []
+    for i in picked:
+        d = rules.read_digest(find_esc_dir(i["cwd"]) / f"{i['id']}.jsonl")
+        payload.append({"id": i["id"], "current": i["current"], "dir": i["dir"],
+                        "ai_title": d["ai_title"], "user_said": d["users"],
+                        "tools": d["tools"]})
+
+    batch = int(cfg.get("batch") or 20)
+    got = {}
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    errors = []
+    for n, start in enumerate(range(0, len(payload), batch), 1):
+        chunk = payload[start:start + batch]
+        try:
+            titles, u = call_llm(cfg, chunk)
+            got.update(titles)
+            for k in usage:
+                usage[k] += int(u.get(k) or 0)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"第 {n} 批失败：{type(e).__name__}: {e}")
+
+    if not got:
+        return {"error": "全部批次都失败了。" + ("；".join(errors) if errors else "")}
+
+    NAMING.mkdir(exist_ok=True)
+    old = {}
+    p = NAMING / "latest.json"
+    if p.exists():
+        try:
+            old = json.loads(p.read_text(encoding="utf-8")).get("titles") or {}
+        except (OSError, ValueError):
+            pass
+    old.update(got)
+    p.write_text(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                             "source": "api", "titles": old},
+                            ensure_ascii=False, indent=1), encoding="utf-8")
+
+    return {"imported": len(got), "usage": usage, "errors": errors,
+            "batches": (len(payload) + batch - 1) // batch}
+
+
+def human_size(n):
+    if n >= 1024 ** 3:
+        return f"{n/1024**3:.1f} GB"
+    if n >= 1024 * 1024:
+        return f"{n/1024/1024:.1f} MB"
+    if n >= 1024:
+        return f"{n/1024:.0f} KB"
+    return f"{n} B"
+
+
+def storage_info():
+    """这个工具自己占了多少地方。只统计，不删。"""
+    def stat_dir(d, pat="*"):
+        files = [f for f in (sorted(d.glob(pat)) if d.is_dir() else []) if f.is_file()]
+        size = sum(f.stat().st_size for f in files)
+        return {"count": len(files), "bytes": size, "human": human_size(size)}
+
+    naming_reqs = stat_dir(NAMING, "request-*.json")
+
+    # 正文目录总占用（会话越多越大，这是 WorkBuddy 占空间的大头）
+    proj = REAL_DB.parent / "projects"
+    proj_files = [f for f in proj.rglob("*") if f.is_file()] if proj.is_dir() else []
+    proj_bytes = sum(f.stat().st_size for f in proj_files)
+
+    # 已删除会话的残留文件：正文 + 同名附件目录还躺在盘上，纯垃圾
+    junk_count = 0
+    junk_bytes = 0
+    con = connect()
+    del_rows = con.execute(
+        "SELECT id, cwd FROM sessions WHERE deleted_at IS NOT NULL").fetchall()
+    con.close()
+    for r in del_rows:
+        f = session_file(r["id"], r["cwd"])
+        if f.exists():
+            junk_count += 1
+            junk_bytes += f.stat().st_size
+            att = f.parent / f.stem
+            if att.is_dir():
+                junk_bytes += sum(g.stat().st_size for g in att.rglob("*") if g.is_file())
+
+    # 数据库所在盘的剩余空间（C 盘紧张的用户最关心这个）
+    try:
+        drive_free = shutil.disk_usage(REAL_DB.anchor).free
+    except OSError:
+        drive_free = 0
+
+    return {
+        "backups": stat_dir(BACKUPS, "snap-*.json"),
+        "naming_requests": naming_reqs,
+        "naming_keep": KEEP_NAMING,
+        "naming_extra": max(0, naming_reqs["count"] - KEEP_NAMING),
+        "total_human": human_size(stat_dir(BACKUPS, "snap-*.json")["bytes"]
+                                  + naming_reqs["bytes"]),
+        "projects_human": human_size(proj_bytes),
+        "projects_count": len(proj_files),
+        "junk_count": junk_count,
+        "junk_human": human_size(junk_bytes),
+        "drive": REAL_DB.anchor,
+        "drive_free_human": human_size(drive_free),
+    }
+
+
+def clean_storage():
+    """清掉多余的命名导出包。只动本工具自己生成的文件。"""
+    if not NAMING.is_dir():
+        return {"deleted": 0, "freed": "0 B"}
+    reqs = sorted([f for f in NAMING.glob("request-*.json") if f.is_file()],
+                  key=lambda f: f.stat().st_mtime, reverse=True)
+    drop = reqs[KEEP_NAMING:]
+    freed = 0
+    for f in drop:
+        try:
+            freed += f.stat().st_size
+            f.unlink()
+        except OSError:
+            pass
+    return {"deleted": len(drop), "freed": human_size(freed)}
+
+
+ARCHIVE_ORIG = HERE / "archive-orig.json"
+
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+def _load_orig():
+    if ARCHIVE_ORIG.exists():
+        try:
+            return json.loads(ARCHIVE_ORIG.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
+def _save_orig(d):
+    ARCHIVE_ORIG.write_text(json.dumps(d, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+
+
+def _ms_to_str(ms):
+    """WorkBuddy 的时间都是毫秒时间戳，转成看得懂的写法。"""
+    if not ms:
+        return "—"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(int(ms) / 1000))
+    except (ValueError, OSError, OverflowError):
+        return "—"
+
+
+def scan_trash(limit=400):
+    """列出被删除的会话，并判断还能不能救。
+
+    WorkBuddy 删会话只把 deleted_at 填上，正文文件不一定当场清掉，
+    所以删完一段时间内是能捞回来的。能不能救只看一件事：
+    projects 下还有没有对应的 .jsonl。
+
+    正文不在预期目录的，按会话 id 全盘找一次——工作目录改过、搬过盘的
+    情况很常见，文件常常躺在旧目录里。
+    """
+    con = connect()
+    rows = [dict(r) for r in con.execute("""
+        SELECT id, cwd, COALESCE(custom_title, title) t,
+               deleted_at, created_at, updated_at, status
+        FROM sessions WHERE deleted_at IS NOT NULL
+        ORDER BY deleted_at DESC LIMIT ?""", (limit,)).fetchall()]
+    con.close()
+
+    proj = REAL_DB.parent / "projects"
+    items = []
+    for r in rows:
+        cwd = r["cwd"] or ""
+        want = find_esc_dir(cwd) / f"{r['id']}.jsonl"
+        src = want if want.exists() else None
+        moved_from = ""
+        if src is None:
+            hits = list(proj.glob(f"*/{r['id']}.jsonl"))
+            if hits:
+                src = hits[0]
+                moved_from = src.parent.name
+        size = src.stat().st_size if src else 0
+        items.append({
+            "id": r["id"],
+            "title": r["t"] or "（没有标题）",
+            "cwd": cwd,
+            "dir": rules.tail_dir(cwd) if cwd else "（无目录）",
+            "deleted_at": r["deleted_at"],
+            "deleted_h": _ms_to_str(r["deleted_at"]),
+            "created_h": _ms_to_str(r["created_at"]),
+            "status": r["status"],
+            "file_ok": bool(src),
+            "size": size,
+            "size_h": human_size(size) if src else "—",
+            "moved_from": moved_from,
+            "line_count": None,
+        })
+    ok = sum(1 for x in items if x["file_ok"])
+    return {"items": items, "count": len(items), "recoverable": ok,
+            "lost": len(items) - ok}
+
+
+def inspect_trash(sid):
+    """看一条被删会话的具体内容，帮助判断值不值得救。
+
+    只读文件前若干行，不解析整份——有些会话几 MB，全读会卡。
+    """
+    con = connect()
+    r = con.execute("""SELECT id, cwd, COALESCE(custom_title, title) t,
+                              deleted_at, created_at, status
+                       FROM sessions WHERE id LIKE ? AND deleted_at IS NOT NULL""",
+                    (sid + "%",)).fetchone()
+    con.close()
+    if r is None:
+        return {"error": "找不到这条待恢复的会话"}
+    sid = r["id"]
+
+    proj = REAL_DB.parent / "projects"
+    f = find_esc_dir(r["cwd"] or "") / f"{sid}.jsonl"
+    if not f.exists():
+        hits = list(proj.glob(f"*/{sid}.jsonl"))
+        f = hits[0] if hits else None
+    if f is None:
+        return {"error": "正文文件已经没了，这条救不回来", "id": sid, "title": r["t"]}
+
+    lines = 0
+    first_user = ""
+    first_ai = ""
+    last_ai = ""
+    n_user = 0
+    n_ai = 0
+    n_tool = 0
+    try:
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                lines += 1
+                if len(line) > 400000:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                typ = d.get("type")
+                if typ == "function_call":
+                    n_tool += 1
+                role = d.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                texts = []
+                for c in d.get("content") or []:
+                    if isinstance(c, dict) and c.get("type") in ("input_text", "output_text"):
+                        t = (c.get("text") or "").strip()
+                        if t:
+                            texts.append(t)
+                if not texts:
+                    continue
+                joined = "\n".join(texts).strip()
+                if role == "user":
+                    n_user += 1
+                    # 系统注入的块（<system-reminder>）、续接语都不是用户问的话
+                    skip = ("<", "Please continue", "This session is being continued",
+                            "Continue with", "Continue from")
+                    if not first_user and not joined.startswith(skip):
+                        first_user = joined[:300]
+                else:
+                    n_ai += 1
+                    if not first_ai:
+                        first_ai = joined[:260]
+                    last_ai = joined[:200]
+    except OSError:
+        pass
+
+    return {
+        "id": sid,
+        "title": r["t"] or "",
+        "cwd": r["cwd"] or "",
+        "dir": rules.tail_dir(r["cwd"]),
+        "deleted_h": _ms_to_str(r["deleted_at"]),
+        "created_h": _ms_to_str(r["created_at"]),
+        "size_h": human_size(f.stat().st_size),
+        "lines": lines,
+        "file": str(f),
+        "first_user": first_user or "（这次没有你的提问，是自动任务或续接出来的会话）",
+        "first_ai": first_ai or "（没有可读的回复）",
+        "last_ai": last_ai,
+        "n_user": n_user,
+        "n_ai": n_ai,
+        "n_tool": n_tool,
+        "auto": n_user <= 1,
+    }
+
+
+def restore_trash(ids, target_cwd=None):
+    """把删掉的会话救回来。
+
+    只做两件事：把 deleted_at 清空、把正文放回该在的位置。
+    标题、正文内容、状态一概不动。
+
+    正文躺在别的目录的（改过工作目录、搬过盘），会先搬回来再恢复，
+    不搬的话恢复出来是空会话。
+    """
+    ids = [i for i in (ids or []) if i]
+    if not ids:
+        return {"error": "没有选中要恢复的会话"}
+
+    snap = snapshot("before-restore-trash")
+    con = connect()
+    info = {}
+    for i in ids:
+        r = con.execute("""SELECT id, cwd, COALESCE(custom_title, title) t
+                           FROM sessions WHERE id=? AND deleted_at IS NOT NULL""",
+                        (i,)).fetchone()
+        if r is not None:
+            info[i] = dict(r)
+    con.close()
+
+    if not info:
+        return {"error": "这些会话已经不在待恢复列表里了（可能已经恢复过）",
+                "changed": 0}
+
+    proj = REAL_DB.parent / "projects"
+    restored, blocked, moved = [], [], 0
+    con = connect(write=True)
+    try:
+        with con:
+            for sid, r in info.items():
+                want = rules.norm_path((target_cwd or r["cwd"] or "").strip())
+                if not want:
+                    blocked.append({"id": sid, "title": r["t"],
+                                    "why": "这条没记过目录，先给个目标目录再恢复"})
+                    continue
+
+                dst_dir = find_esc_dir(want)
+                dst = dst_dir / f"{sid}.jsonl"
+
+                src = dst if dst.exists() else None
+                if src is None:
+                    hits = list(proj.glob(f"*/{sid}.jsonl"))
+                    src = hits[0] if hits else None
+                if src is None:
+                    blocked.append({"id": sid, "title": r["t"],
+                                    "why": "正文文件已经没了，恢复出来是空会话"})
+                    continue
+
+                if src != dst:
+                    if dst.exists():
+                        blocked.append({"id": sid, "title": r["t"],
+                                        "why": "目标位置已有同名文件，不覆盖"})
+                        continue
+                    try:
+                        dst_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(src), str(dst))
+                        # 工具输出目录跟着走，否则历史里的附件打不开
+                        sub = src.parent / sid
+                        if sub.is_dir():
+                            tsub = dst_dir / sid
+                            if not tsub.exists():
+                                shutil.move(str(sub), str(tsub))
+                        moved += 1
+                    except OSError as e:
+                        blocked.append({"id": sid, "title": r["t"],
+                                        "why": f"搬正文失败：{e}"})
+                        continue
+
+                con.execute("UPDATE sessions SET deleted_at=NULL, cwd=? WHERE id=?",
+                            (want, sid))
+                restored.append(sid)
+    finally:
+        con.close()
+
+    log_action("恢复已删除会话", len(restored), snap,
+               f"{len(blocked)} 条救不回" if blocked else "")
+    return {"changed": len(restored), "restored": restored,
+            "blocked": blocked, "moved_files": moved, "snapshot": snap}
+
+
+def list_archive():
+    """列出当前归档的会话。
+
+    last_activity_at 是新版 WorkBuddy 才有的列，旧库没有——
+    先用 PRAGMA 探测列在不在，不在就降级只按 updated_at 排，别直接崩。
+    """
+    con = connect()
+    cols = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
+    order_col = "last_activity_at" if "last_activity_at" in cols else None
+    sel = f", last_activity_at" if order_col else ""
+    order = (f"ORDER BY COALESCE(last_activity_at, updated_at) DESC" if order_col
+             else "ORDER BY updated_at DESC")
+    rows = [dict(r) for r in con.execute(
+        f"SELECT id, COALESCE(custom_title, title) t, cwd, updated_at{sel} "
+        f"FROM sessions WHERE deleted_at IS NULL AND LOWER(status)='archived' "
+        f"{order}").fetchall()]
+    con.close()
+    orig = _load_orig()
+    for r in rows:
+        r["orig_status"] = orig.get(r["id"], "completed")
+    return {"items": rows, "count": len(rows)}
+
+
+def archive_sessions(ids, archive=True):
+    """归档 / 取消归档。
+
+    ⛔ 只用 status 字段，绝不用 deleted_at：
+       WorkBuddy 的保留策略会把 deleted_at 非空的会话当删除候选真删掉，
+       而 status='archived' 的会被明确跳过（archivedSkipped）——归档反而受保护。
+
+    改完要重启 WorkBuddy 才看得到效果：它不监听外部改库。
+    """
+    if not ids:
+        return {"error": "没有选中会话", "changed": 0}
+
+    snap = snapshot("before-archive" if archive else "before-unarchive")
+    orig = _load_orig()
+    con = connect(write=True)
+    changed = 0
+    blocked = []
+    try:
+        with con:
+            for sid in ids:
+                row = con.execute(
+                    "SELECT status, deleted_at FROM sessions WHERE id=?", (sid,)).fetchone()
+                if row is None:
+                    blocked.append({"id": sid, "why": "数据库里没有这条会话"})
+                    continue
+                if row["deleted_at"] is not None:
+                    blocked.append({"id": sid, "why": "这条已在回收站，先恢复再收起"})
+                    continue
+                cur = (row["status"] or "").lower()
+
+                if archive:
+                    if cur == "archived":
+                        continue
+                    orig[sid] = row["status"] or "completed"
+                    con.execute("UPDATE sessions SET status='archived', updated_at=? "
+                                "WHERE id=?", (_now_ms(), sid))
+                else:
+                    if cur != "archived":
+                        continue
+                    back = orig.pop(sid, None) or "completed"
+                    con.execute("UPDATE sessions SET status=?, updated_at=? WHERE id=?",
+                                (back, _now_ms(), sid))
+                changed += 1
+    finally:
+        con.close()
+
+    _save_orig(orig)
+    log_action("收起" if archive else "取消收起", changed, snap,
+               f"{len(blocked)} 条被跳过" if blocked else "")
+    return {"changed": changed, "snapshot": snap, "blocked": blocked,
+            "need_restart": changed > 0}
+
+
+def organize_all(dry_run=False):
+    """一键整理：把「规则有把握」的建议标题一次性应用。
+
+    只动有把握的，三类跳过：
+    - 需确认（规则没认出的）——留给你人工或 AI 起名
+    - 正在使用的——文件 3 分钟内被写过
+    - 已收起的——收起的东西不折腾
+    apply_titles 内部会先自动快照，改坏可撤。
+    dry_run=True 时只返回「将要改什么」，不写任何东西——给检查窗口用。
+    """
+    items = load_sessions()
+    picked = [
+        x for x in items
+        if x["changed"] and not x["conflict"] and not x["active"] and not x["archived"]
+    ]
+    if dry_run:
+        return {
+            "dry_run": True,
+            "pairs": [{"id": x["id"], "current": x["current"],
+                       "suggest": x["suggest"], "type": x["type"]} for x in picked],
+            "skipped_confirm": sum(1 for x in items if x["conflict"] and not x["archived"]),
+            "skipped_active": sum(1 for x in items if x["active"]),
+            "skipped_archived": sum(1 for x in items if x["archived"]),
+        }
+    pairs = [{"id": x["id"], "title": x["suggest"]} for x in picked]
+    skipped_confirm = sum(1 for x in items if x["conflict"] and not x["archived"])
+    skipped_active = sum(1 for x in items if x["active"])
+    if not pairs:
+        return {"changed": 0, "snapshot": None, "pairs": [],
+                "skipped_confirm": skipped_confirm, "skipped_active": skipped_active}
+    r = apply_titles(pairs)
+    return {"changed": r.get("changed", 0), "snapshot": r.get("snapshot"),
+            "skipped_confirm": skipped_confirm, "skipped_active": skipped_active,
+            "need_restart": True}
+
+
+def backups_cleanup(keep=20):
+    """一键把快照清到最近 keep 份。逐份删，失败的收集原因不中断——
+    Windows 下文件被占用或权限不足都可能删不掉，如实报告给用户。"""
+    rows = list_backups()          # 已按时间倒序
+    keep = max(1, min(200, int(keep or 20)))
+    victims = rows[keep:]
+    deleted, failed = [], []
+    for v in victims:
+        try:
+            (BACKUPS / v["name"]).unlink()
+            deleted.append(v["name"])
+        except OSError as e:
+            failed.append({"name": v["name"], "why": f"{type(e).__name__}: {e}"})
+    if deleted:
+        log_action("清理旧快照", len(deleted), None,
+                   f"保留最近 {keep} 份" + (f"，{len(failed)} 份没删掉" if failed else ""))
+    return {"deleted": len(deleted), "failed": failed, "left": len(list_backups())}
+
+
+def rename_workspace(path, new_name):
+    """给闲置的工作空间文件夹改个看得懂的名字（纯 mv，内容一个字不动）。
+
+    只允许改「默认工作空间里、没有存活会话在用」的文件夹，
+    新名字不能和已有目录重名。改名不影响 WorkBuddy 数据——
+    闲置空间没有会话还指着原路径。
+    """
+    new_name = (new_name or "").strip()
+    if not new_name or any(c in new_name for c in '\\/:*?"<>|'):
+        return {"error": "新名字不能为空，也不能带 \\ / : * ? \" < > | 这些字符"}
+    try:
+        d = Path(path).resolve()
+        root = _ws_root().resolve()
+        d.relative_to(root)
+    except (OSError, ValueError):
+        return {"error": "只能改默认工作空间里的文件夹"}
+    if not d.is_dir() or d == root:
+        return {"error": "文件夹不存在或是根目录"}
+    pat_variants = {str(d), d.as_posix()}
+    con = connect()
+    n = 0
+    for pat in pat_variants:
+        n += con.execute("SELECT COUNT(*) c FROM sessions "
+                         "WHERE deleted_at IS NULL AND cwd LIKE ?",
+                         (pat + "%",)).fetchone()["c"]
+    con.close()
+    if n:
+        return {"error": f"还有 {n} 条会话放在这个目录里，先移走再改名"}
+    target = d.parent / new_name
+    if target.exists():
+        return {"error": "同名文件夹已经存在"}
+    try:
+        d.rename(target)
+    except OSError as e:
+        return {"error": f"改名失败：{e}"}
+    log_action("空间改名", 1, None, f"{d.name} → {new_name}")
+    return {"ok": True, "new_path": str(target)}
+
+
+def purge_deleted_files(ids=None):
+    """清理「已删除会话」在磁盘上的残留文件（正文 + 同名附件目录）。
+
+    ⛔ 只删数据库里 deleted_at 非空的会话的文件。活跃会话碰都不碰。
+    这些文件留着没有任何作用——会话已经被删，WorkBuddy 不会再读它们。
+    删之前 UI 会弹确认框，这里再校验一遍删除标记，双保险。
+    """
+    con = connect()
+    rows = [dict(r) for r in con.execute(
+        "SELECT id, cwd FROM sessions WHERE deleted_at IS NOT NULL").fetchall()]
+    con.close()
+    want = {r["id"] for r in rows}
+    targets = [r for r in rows if ids is None or r["id"] in set(ids)]
+
+    removed = 0
+    freed = 0
+    skipped = []
+    for r in targets:
+        f = session_file(r["id"], r["cwd"])
+        if not f.exists():
+            continue
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            removed += 1
+            freed += size
+            # 同名附件目录（存工具输出等），有就一起删
+            att = f.parent / f.stem
+            if att.is_dir():
+                import shutil as _sh
+                for g in att.rglob("*"):
+                    if g.is_file():
+                        freed += g.stat().st_size
+                _sh.rmtree(att, ignore_errors=True)
+        except OSError as e:
+            skipped.append({"id": r["id"], "why": str(e)})
+    if removed:
+        log_action("清理已删会话残留", removed, None, f"释放 {human_size(freed)}")
+    return {"removed": removed, "freed": human_size(freed),
+            "left": len(want) - removed, "skipped": skipped}
+
+
+def preview_move(pairs):
+    """只算不执行：把每条会话会怎么搬、会不会被拦，全列出来给用户确认。
+
+    搬目录是这个工具里唯一会动磁盘文件的动作，所以先出对照表，
+    用户看清「哪条、从哪到哪、文件多大」之后再决定，不搞一键闷头执行。
+    """
+    if not IS_WIN:
+        return {"items": [], "can_move": 0, "blocked": len(pairs),
+                "wb_running": wb_running(),
+                "error": "搬目录只在 Windows 上验证过。当前系统的目录转义规则没把握，"
+                         "算错会让会话打不开，所以这边不提供。改标题和归档不受影响。"}
+    con = connect()
+    out = []
+    for p in pairs:
+        sid = p.get("id")
+        new_cwd = rules.norm_path((p.get("cwd") or "").strip())
+        row = con.execute(
+            "SELECT cwd, COALESCE(custom_title, title) t FROM sessions WHERE id=?",
+            (sid,)).fetchone()
+        if row is None:
+            out.append({"id": sid, "title": "（会话不存在）", "status": "跳过",
+                        "why": "数据库里找不到这条会话"})
+            continue
+        old_cwd = row["cwd"] or ""
+        src = find_esc_dir(old_cwd) / f"{sid}.jsonl"
+        dst_dir = find_esc_dir(new_cwd)
+        dst = dst_dir / f"{sid}.jsonl"
+
+        status, why = "可搬", ""
+        if rules.norm_path(old_cwd) == new_cwd:
+            status, why = "跳过", "目录没变"
+        elif is_active(src):
+            status, why = "跳过", "正在使用中，等它闲下来"
+        elif not src.exists():
+            status, why = "跳过", "找不到正文文件，搬了会丢内容"
+        elif dst.exists():
+            status, why = "跳过", "目标已有同名文件，不覆盖"
+
+        size = src.stat().st_size if src.exists() else 0
+        out.append({
+            "id": sid, "title": row["t"] or "",
+            "from": old_cwd, "to": new_cwd,
+            "from_dir": src.parent.name, "to_dir": dst_dir.name,
+            "file": str(src), "size": size,
+            "new_dir": not dst_dir.is_dir(),   # 目标目录还不存在，搬的时候会新建
+            "size_h": f"{size/1024/1024:.1f} MB" if size > 1024*1024 else f"{size/1024:.0f} KB",
+            "status": status, "why": why,
+        })
+    con.close()
+
+    ok = sum(1 for x in out if x["status"] == "可搬")
+    return {"items": out, "can_move": ok, "blocked": len(out) - ok,
+            "wb_running": wb_running()}
+
+
+def scan_path_styles():
+    """找出同一个物理目录被写成几种样子。
+
+    WorkBuddy 侧栏是按 cwd 字符串分组的，F:\\AI\\x 和 F:/AI/x 会被当成两个目录，
+    侧栏就裂成两组。合并它们只需要把字符串统一，不用搬任何文件——
+    因为两种写法转义出的目录名是一样的（先 norm 再转义）。
+    """
+    items = load_sessions()
+    groups = {}
+    for i in items:
+        groups.setdefault(i["cwd_norm"].lower(), []).append(i)
+
+    out = []
+    for key, arr in groups.items():
+        styles = {i["cwd"] for i in arr}
+        if len(styles) > 1:
+            out.append({
+                "cwd_norm": key,
+                "styles": sorted(styles),
+                "count": len(arr),
+                "target": arr[0]["cwd_norm"],
+            })
+    return {"groups": out, "total_groups": len(out),
+            "total_sessions": sum(g["count"] for g in out)}
+
+
+def unify_paths(keys=None):
+    """把 cwd 统一成规范写法。只改数据库字符串，不动文件。
+
+    安全前提：esc(任意写法) 结果相同，所以改完 WorkBuddy 找正文还去同一个目录。
+    这个前提只在 Windows 上验证过，别的系统不提供。
+    """
+    if not IS_WIN:
+        return {"changed": 0, "groups": 0,
+                "error": "路径写法统一只在 Windows 上验证过，当前系统不提供。"}
+    scan = scan_path_styles()
+    want = {k.lower() for k in keys} if keys else None
+    todo = [g for g in scan["groups"] if not want or g["cwd_norm"].lower() in want]
+    if not todo:
+        return {"changed": 0, "groups": 0}
+
+    targets = {g["cwd_norm"].lower(): g["target"] for g in todo}
+
+    snap = snapshot("before-unify")
+    con = connect(write=True)
+    changed = 0
+    detail = []
+    try:
+        with con:
+            rows = con.execute(
+                "SELECT id, cwd FROM sessions WHERE deleted_at IS NULL").fetchall()
+            per_group = {}
+            for r in rows:
+                cur = r["cwd"] or ""
+                key = rules.norm_path(cur).lower()
+                if key not in targets:
+                    continue
+                per_group.setdefault(key, 0)
+                per_group[key] += 1
+                if cur == targets[key]:
+                    continue
+                con.execute("UPDATE sessions SET cwd=? WHERE id=?",
+                            (targets[key], r["id"]))
+                changed += 1
+            for g in todo:
+                detail.append({"cwd": g["target"], "styles": g["styles"],
+                               "sessions": per_group.get(g["cwd_norm"].lower(), 0)})
+    finally:
+        con.close()
+    log_action("统一路径写法", changed, snap, f"合并 {len(todo)} 组")
+    return {"changed": changed, "groups": len(todo), "snapshot": snap, "detail": detail}
+
+
+def move_sessions(pairs):
+    """pairs: [{id, cwd}]。改会话所在目录，并同步搬迁会话正文文件。
+
+    关键：WorkBuddy 按 projects/<转义cwd>/<会话id>.jsonl 找正文，
+    只改数据库里的 cwd 而不搬文件，会话在界面上就打不开了。所以两件事必须一起做。
+
+    三道保护：
+    1. 正在使用的会话（文件 3 分钟内被写过）一律不动，防止搬走对方正在写的文件。
+    2. 目标位置已有同名文件则跳过，绝不覆盖。
+    3. 源文件不在则跳过，不凭空改数据库。
+    """
+    if not pairs:
+        return {"changed": 0, "snapshot": None, "blocked": []}
+
+    if not IS_WIN:
+        return {"error": "搬目录只在 Windows 上验证过，当前系统不支持。"
+                         "改标题和归档不受影响。", "changed": 0}
+
+    running = wb_running()
+    snap = snapshot("before-move")
+    con = connect(write=True)
+    changed = 0
+    moved = []
+    blocked = []
+    try:
+        with con:
+            for p in pairs:
+                sid = p.get("id")
+                new_cwd = rules.norm_path((p.get("cwd") or "").strip())
+                if not sid or not new_cwd:
+                    continue
+                row = con.execute("SELECT cwd FROM sessions WHERE id=?", (sid,)).fetchone()
+                if row is None:
+                    continue
+                old_cwd = row["cwd"] or ""
+                if rules.norm_path(old_cwd) == new_cwd:
+                    continue
+
+                src = find_esc_dir(old_cwd) / f"{sid}.jsonl"
+                dst_dir = find_esc_dir(new_cwd)
+                dst = dst_dir / f"{sid}.jsonl"
+
+                if is_active(src):
+                    blocked.append({"id": sid, "why": "这条会话正在使用中，等它闲下来再搬"})
+                    continue
+                if not src.exists():
+                    blocked.append({"id": sid, "why": "找不到会话正文文件，跳过以免丢内容"})
+                    continue
+                if dst.exists():
+                    blocked.append({"id": sid, "why": "目标位置已有同名文件，跳过不覆盖"})
+                    continue
+
+                size_before = src.stat().st_size
+                try:
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(dst))
+                except OSError as e:
+                    blocked.append({"id": sid, "why": f"搬文件失败：{e}"})
+                    continue
+
+                if not dst.exists() or dst.stat().st_size != size_before:
+                    blocked.append({"id": sid, "why": "搬后校验不一致，已跳过数据库改动"})
+                    continue
+
+                con.execute("UPDATE sessions SET cwd=? WHERE id=?", (new_cwd, sid))
+                changed += 1
+                moved.append({"id": sid, "from": src.parent.name, "to": dst_dir.name})
+    finally:
+        con.close()
+
+    # 源目录空了就一并清掉，免得侧栏留着空分组
+    cleaned = []
+    for name in {m["from"] for m in moved}:
+        d = REAL_DB.parent / "projects" / name
+        try:
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+                cleaned.append(name)
+        except OSError:
+            pass
+
+    log_action("移到空间", changed, snap,
+               f"{len(blocked)} 条被跳过" if blocked else "")
+    return {"changed": changed, "snapshot": snap, "blocked": blocked,
+            "moved": moved, "cleaned_dirs": cleaned,
+            "wb_running": running}
+
+
+def restore(name):
+    p = BACKUPS / name
+    if not p.exists():
+        return {"error": "快照不存在"}
+    d = json.loads(p.read_text(encoding="utf-8"))
+    snap = snapshot("before-restore")
+    con = connect(write=True)
+    changed = 0
+    try:
+        with con:
+            for r in d["rows"]:
+                cur = con.execute(
+                    "SELECT custom_title, cwd, status FROM sessions WHERE id=?",
+                    (r["id"],)).fetchone()
+                if cur is None:
+                    continue
+                title_diff = (cur["custom_title"] or "") != (r["custom_title"] or "")
+                cwd_diff = (cur["cwd"] or "") != (r["cwd"] or "")
+                # 老快照没有 status 字段，这时只还原标题和目录，不动状态
+                want_status = r.get("status")
+                status_diff = (want_status is not None
+                               and (cur["status"] or "") != want_status)
+                if not (title_diff or cwd_diff or status_diff):
+                    continue
+                if status_diff:
+                    con.execute(
+                        "UPDATE sessions SET custom_title=?, cwd=?, status=? WHERE id=?",
+                        (r["custom_title"], r["cwd"], want_status, r["id"]))
+                else:
+                    con.execute(
+                        "UPDATE sessions SET custom_title=?, cwd=? WHERE id=?",
+                        (r["custom_title"], r["cwd"], r["id"]))
+                changed += 1
+    finally:
+        con.close()
+    log_action("还原快照", changed, snap, f"从 {name} 还原")
+    return {"changed": changed, "snapshot": snap, "restored_from": name}
+
+
+# ---------- HTTP ----------
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body, ensure_ascii=False)
+        raw = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        try:
+            if path in ("/", "/index.html"):
+                self._send(200, UI.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+            elif path == "/api/state":
+                items = load_sessions()
+                self._send(200, {"stats": stats(items), "items": items,
+                                 "db": str(REAL_DB), "db_exists": REAL_DB.exists(),
+                                 "platform": "windows" if IS_WIN else sys.platform,
+                                 "platform_ok": IS_WIN,
+                                 "backups": list_backups()})
+            elif path == "/api/backups":
+                self._send(200, {"backups": list_backups()})
+            elif path == "/api/naming/export":
+                self._send(200, export_naming())
+            elif path == "/api/paths":
+                self._send(200, scan_path_styles())
+            elif path == "/api/storage":
+                self._send(200, storage_info())
+            elif path == "/api/archive/list":
+                self._send(200, list_archive())
+            elif path == "/api/history":
+                self._send(200, list_history())
+            elif path == "/api/trash":
+                qs = parse_qs(urlparse(self.path).query)
+                self._send(200, scan_trash())
+            elif path == "/api/trash/inspect":
+                qs = parse_qs(urlparse(self.path).query)
+                self._send(200, inspect_trash((qs.get("id") or [""])[0]))
+            elif path == "/api/workspaces":
+                self._send(200, scan_workspaces())
+            elif path == "/api/rehome/plan":
+                qs = parse_qs(urlparse(self.path).query)
+                self._send(200, plan_rehome((qs.get("root") or [""])[0] or None))
+            elif path == "/api/disks":
+                self._send(200, scan_disks())
+            elif path == "/api/types":
+                self._send(200, {"types": [
+                    {"emoji": e, "name": n, "keys": k} for e, n, k in rules.TYPE_RULES
+                ]})
+            elif path == "/api/config":
+                self._send(200, public_config())
+            else:
+                self._send(404, {"error": "not found"})
+        except Exception as e:  # noqa: BLE001
+            self._send(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            self._send(400, {"error": "bad json"})
+            return
+        try:
+            if path == "/api/apply":
+                self._send(200, apply_titles(body.get("pairs") or []))
+            elif path == "/api/move":
+                self._send(200, move_sessions(body.get("pairs") or []))
+            elif path == "/api/move/preview":
+                self._send(200, preview_move(body.get("pairs") or []))
+            elif path == "/api/backup":
+                self._send(200, {"snapshot": snapshot("manual")})
+            elif path == "/api/backups/delete":
+                self._send(200, delete_backup(body.get("name") or ""))
+            elif path == "/api/backups/cleanup":
+                self._send(200, backups_cleanup(body.get("keep") or 20))
+            elif path == "/api/restore":
+                self._send(200, restore(body.get("name") or ""))
+            elif path == "/api/history/undo":
+                # 撤回 = 先把目录/文件反向搬回去，再套快照里的标题与状态。
+                # restore 内部会再存一份 before-restore 快照，撤错了还能再撤回来。
+                snap = body.get("snapshot") or ""
+                r = undo_snapshot(snap)
+                if not r.get("error"):
+                    log_action("撤回", r.get("changed", 0), r.get("snapshot"),
+                               f"撤回 {snap}")
+                self._send(200, r)
+            elif path == "/api/trash/restore":
+                self._send(200, restore_trash(body.get("ids") or [],
+                                              body.get("target_cwd")))
+            elif path == "/api/organize_all":
+                self._send(200, organize_all(dry_run=bool(body.get("dry_run"))))
+            elif path == "/api/trash/purge":
+                self._send(200, purge_deleted_files(body.get("ids")))
+            elif path == "/api/workspaces/clean":
+                r = clean_workspaces(body.get("paths") or [])
+                r["wb_running"] = wb_running()
+                self._send(200, r)
+            elif path == "/api/workspaces/rename":
+                self._send(200, rename_workspace(body.get("path") or "",
+                                                 body.get("new_name") or ""))
+            elif path == "/api/workspaces/memory":
+                self._send(200, read_workspace_memory(body.get("path") or ""))
+            elif path == "/api/naming/import":
+                self._send(200, import_naming(body))
+            elif path == "/api/naming/clear":
+                (NAMING / "latest.json").unlink(missing_ok=True)
+                self._send(200, {"cleared": True})
+            elif path == "/api/paths/unify":
+                self._send(200, unify_paths(body.get("keys")))
+            elif path == "/api/storage/clean":
+                self._send(200, clean_storage())
+            elif path == "/api/config":
+                self._send(200, save_config(body))
+            elif path == "/api/naming/auto":
+                self._send(200, naming_auto(body.get("ids")))
+            elif path == "/api/archive":
+                self._send(200, archive_sessions(body.get("ids") or [],
+                                                 bool(body.get("archive", True))))
+            else:
+                self._send(404, {"error": "not found"})
+        except Exception as e:  # noqa: BLE001
+            self._send(500, {"error": f"{type(e).__name__}: {e}"})
+
+
+def pick_port(start, tries=20):
+    """端口被占就往后找，避免撞上别的程序。"""
+    import socket
+    for p in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", p))
+                return p
+            except OSError:
+                continue
+    sys.exit(f"{start} 往后 {tries} 个端口都被占了，换 --port 指定一个")
+
+
+def main():
+    global REAL_DB, DB_SOURCE
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--db", help="手动指定 workbuddy.db 路径")
+    ap.add_argument("--no-browser", action="store_true")
+    args = ap.parse_args()
+
+    REAL_DB, DB_SOURCE = resolve_db(args.db)
+
+    if not REAL_DB.exists():
+        print(f"[db] 找不到数据库：{REAL_DB}")
+        print(f"[db] 查找依据：{DB_SOURCE}")
+        print("[db] 如果 WorkBuddy 装在别的账户或改过数据目录，用这条命令指定：")
+        print(f'     python wbmanager.py --db "D:\\你的路径\\workbuddy.db"')
+        sys.exit(1)
+    if not UI.exists():
+        sys.exit(f"找不到界面文件：{UI}")
+
+    # 启动自检：连不上就别起服务，直接把原因打出来
+    try:
+        con = connect()
+        n = con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        con.close()
+        print(f"[db] 连接正常，{n} 条会话")
+    except Exception as e:  # noqa: BLE001
+        sys.exit(f"[db] 打不开数据库：{type(e).__name__}: {e}\n路径：{REAL_DB}")
+
+    port = pick_port(args.port)
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://127.0.0.1:{port}/"
+
+    # 把端口写下来，WorkBuddy 会话里的 AI 靠它找到服务，不用猜
+    NAMING.mkdir(exist_ok=True)
+    (HERE / "port.txt").write_text(str(port), encoding="utf-8")
+
+    print(f"wb-manager 已启动：{url}")
+    if port != args.port:
+        print(f"（{args.port} 被占用，自动换到 {port}）")
+    print(f"数据库：{REAL_DB}  （来源：{DB_SOURCE}）")
+    print("按 Ctrl+C 停止")
+
+    def open_app_window():
+        """优先 Edge/Chrome 的 --app 模式：没有地址栏和标签页，观感就是桌面应用。
+
+        都找不到再退回系统默认浏览器。"""
+        candidates = [shutil.which("msedge"), shutil.which("chrome")]
+        candidates += [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        ]
+        for exe in candidates:
+            if not exe or not Path(exe).exists():
+                continue
+            try:
+                subprocess.Popen([exe, f"--app={url}"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print("已用应用窗口打开（浏览器 --app 模式）")
+                return
+            except OSError:
+                continue
+        webbrowser.open(url)
+
+    if not args.no_browser:
+        threading.Timer(0.6, open_app_window).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止")
+
+
+if __name__ == "__main__":
+    main()
