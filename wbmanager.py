@@ -62,6 +62,10 @@ sys.path.insert(0, str(HERE))
 import rules  # noqa: E402
 
 MAX_BACKUPS = 20
+# 快照的「写 + 清理旧份」必须串行：两个请求同时进来会算出同一批旧文件，
+# 后一个删到已经不存在的那份，直接把整次操作拖成失败。
+_SNAP_LOCK = threading.Lock()
+_SNAP_SEQ = 0
 
 # WorkBuddy 用环境变量覆盖配置目录，优先级与程序本体一致。
 # 见 app.asar：configDirOverride || WORKBUDDY_CONFIG_DIR || CODEBUDDY_CONFIG_DIR || ~/.workbuddy
@@ -114,12 +118,29 @@ def connect(write=False):
 
     读用普通连接 + PRAGMA query_only，比 URI 的 mode=ro 稳，
     在 Windows 上 URI 带盘符容易踩坑。
+
+    timeout 压到 3 秒：WorkBuddy 正开着写库时，等 10 秒用户只会觉得
+    「点了没反应」，不如早点失败、给一句能看懂的话（见 _db_busy_msg）。
     """
-    con = sqlite3.connect(REAL_DB, timeout=10)
+    con = sqlite3.connect(REAL_DB, timeout=3)
     con.row_factory = sqlite3.Row
     if not write:
         con.execute("PRAGMA query_only=ON")
     return con
+
+
+def _db_busy_msg(err) -> str:
+    """把 SQLite 的英文异常翻成用户能自己处理的一句话。"""
+    low = str(err).lower()
+    if "locked" in low or "busy" in low:
+        return ("数据库正被占用：WorkBuddy（或另一个整理窗口）正在写它。\n"
+                "把 WorkBuddy 关掉，或者等几秒再点一次就好。")
+    if "no such table" in low:
+        return ("这个文件里没有会话表，可能不是 WorkBuddy 的数据库，"
+                "或者 WorkBuddy 还没初始化完。")
+    if "readonly" in low or "unable to open" in low:
+        return "数据库打不开：可能被占用或没有读写权限，试试以管理员身份运行。"
+    return f"读写数据库失败：{err}"
 
 
 ACTIVE_WINDOW = 180  # 正文文件 3 分钟内还在写，就认为正在使用
@@ -247,28 +268,39 @@ def snapshot(tag="manual"):
 
     带 status 是为了归档能还原——归档改的就是 status，
     恢复时得知道原来是 completed 还是 working。
-    """
-    BACKUPS.mkdir(exist_ok=True)
-    con = connect()
-    rows = [dict(r) for r in con.execute(
-        "SELECT id, custom_title, title, cwd, status FROM sessions").fetchall()]
-    con.close()
-    # 文件名精确到毫秒：同一秒内连着两次操作（比如「归类」后立刻「撤回」）
-    # 会撞同名，后一份把前一份覆盖掉，撤回就退错地方。
-    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
-    name = f"snap-{stamp}-{tag}.json"
-    p = BACKUPS / name
-    p.write_text(json.dumps({
-        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "tag": tag,
-        "count": len(rows),
-        "rows": rows,
-    }, ensure_ascii=False), encoding="utf-8")
 
-    # 只留最近 N 份
-    olds = sorted(BACKUPS.glob("snap-*.json"))
-    for f in olds[:-MAX_BACKUPS]:
-        f.unlink()
+    整个「写文件 + 清理旧份」都在锁里串行做：两个请求同时进来会算出
+    同一个毫秒时间戳，文件名撞车时后一个写不进去（Windows 直接 PermissionError）；
+    清理阶段也会重复删同一份。串行化之后这两个坑都不存在，代价只是几十毫秒。
+    """
+    global _SNAP_SEQ
+    BACKUPS.mkdir(exist_ok=True)
+    with _SNAP_LOCK:
+        con = connect()
+        rows = [dict(r) for r in con.execute(
+            "SELECT id, custom_title, title, cwd, status FROM sessions").fetchall()]
+        con.close()
+        # 毫秒 + 进程内序号：同一毫秒连做两次也不会撞名
+        _SNAP_SEQ += 1
+        stamp = (time.strftime("%Y%m%d-%H%M%S")
+                 + f"-{int(time.time() * 1000) % 1000:03d}-{_SNAP_SEQ:04d}")
+        name = f"snap-{stamp}-{tag}.json"
+        p = BACKUPS / name
+        p.write_text(json.dumps({
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "tag": tag,
+            "count": len(rows),
+            "rows": rows,
+        }, ensure_ascii=False), encoding="utf-8")
+
+        # 只留最近 N 份。逐份删、删不掉就跳过——杀软扫描、OneDrive 同步，
+        # 都可能让 unlink 失败；为一份旧快照把整次改名拖垮不值得。
+        olds = sorted(BACKUPS.glob("snap-*.json"))
+        for f in olds[:-MAX_BACKUPS]:
+            try:
+                f.unlink()
+            except OSError:
+                continue
     return p.name
 
 
@@ -837,7 +869,11 @@ def apply_titles(pairs):
     try:
         with con:
             for p in pairs:
-                t = (p.get("title") or "").strip()[:200]
+                # 控制字符（\x00-\x1f）粘进来会让标题在界面上显示成空白，
+                # 之后既搜不到也认不出，统一洗成空格再收。
+                t = str(p.get("title") or "")
+                t = re.sub(r"[\x00-\x1f\x7f]", " ", t)
+                t = re.sub(r"\s+", " ", t).strip()[:200]
                 if not t or not p.get("id"):
                     continue
                 cur = con.execute("SELECT custom_title FROM sessions WHERE id=?",
@@ -961,7 +997,7 @@ def export_naming(ids=None, include_auto=False):
     p.write_text(json.dumps({
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "ask": "给每条会话起名，格式：<类型emoji> <主题>｜<这次做了什么>，"
-               "类型只能是 🛠️开发 🐛排查 🎬制作 📝文案 🔍调研 🗂️整理 💰事务 💬问答 🔁定时。"
+               f"类型只能是 {type_menu()}。"
                "主题不超过 14 字，取这次真正干的事，不要照抄 user_said。"
                "返回严格 JSON：{\"titles\":[{\"id\":\"...\",\"title\":\"...\"}]}",
         "count": len(req),
@@ -1085,18 +1121,28 @@ def save_config(payload):
     return public_config()
 
 
-NAMING_PROMPT = (
-    "你是给程序员整理工作记录的人。下面是一批 WorkBuddy 会话的摘要，"
-    "每条有：当前标题、所在目录、模型给过的旧标题、用户说过的话、用过的工具。\n\n"
-    "给每条重新起名，格式固定为：<类型emoji> <主题>｜<这次做了什么>\n"
-    "类型只能从这些里选一个：🛠️开发 🐛排查 🎬制作 📝文案 🔍调研 🗂️整理 💰事务 💬问答\n"
-    "要求：\n"
-    "1. 主题不超过 14 个字，写清「做的是什么东西」，不要抄用户的原话。\n"
-    "2. 竖线后面写「这件事进行到哪一步」或「这次的产出」，不超过 12 个字。\n"
-    "3. 信息不够就按目录和工具猜，别留空，别写「未知」。\n"
-    "4. 不输出任何解释，只返回 JSON。\n\n"
-    "返回格式：{\"titles\":[{\"id\":\"原样返回的id\",\"title\":\"起的名字\"}]}"
-)
+def type_menu() -> str:
+    """给模型看的类型清单：从规则表实时生成。
+
+    写死七个的时候，用户后来加的 14 类（写作/健康/运营…）AI 永远用不上，
+    所以这里跟着 TYPE_RULES 走，加类型不用再改提示词。
+    """
+    return " ".join(f"{e}{n}" for e, n, _ in rules.TYPE_RULES)
+
+
+def naming_prompt() -> str:
+    return (
+        "你是给程序员整理工作记录的人。下面是一批 WorkBuddy 会话的摘要，"
+        "每条有：当前标题、所在目录、模型给过的旧标题、用户说过的话、用过的工具。\n\n"
+        "给每条重新起名，格式固定为：<类型emoji> <主题>｜<这次做了什么>\n"
+        f"类型只能从这些里选一个：{type_menu()}\n"
+        "要求：\n"
+        "1. 主题不超过 14 个字，写清「做的是什么东西」，不要抄用户的原话。\n"
+        "2. 竖线后面写「这件事进行到哪一步」或「这次的产出」，不超过 12 个字。\n"
+        "3. 信息不够就按目录和工具猜，别留空，别写「未知」。\n"
+        "4. 不输出任何解释，只返回 JSON。\n\n"
+        "返回格式：{\"titles\":[{\"id\":\"原样返回的id\",\"title\":\"起的名字\"}]}"
+    )
 
 
 def call_llm(cfg, items):
@@ -1104,7 +1150,7 @@ def call_llm(cfg, items):
     body = {
         "model": cfg["model"],
         "messages": [
-            {"role": "system", "content": NAMING_PROMPT},
+            {"role": "system", "content": naming_prompt()},
             {"role": "user", "content": json.dumps(
                 [{"id": i["id"], "当前标题": i["current"], "目录": i["dir"],
                   "旧标题": i["ai_title"], "用户说过": i["user_said"][:3],
@@ -1644,7 +1690,11 @@ def backups_cleanup(keep=20):
     """一键把快照清到最近 keep 份。逐份删，失败的收集原因不中断——
     Windows 下文件被占用或权限不足都可能删不掉，如实报告给用户。"""
     rows = list_backups()          # 已按时间倒序
-    keep = max(1, min(200, int(keep or 20)))
+    try:
+        keep = int(keep or 20)
+    except (TypeError, ValueError):
+        keep = 20
+    keep = max(1, min(200, keep))
     victims = rows[keep:]
     deleted, failed = [], []
     for v in victims:
@@ -2060,13 +2110,49 @@ def move_sessions(pairs):
 
 
 def restore(name):
+    """把数据库还原到某份快照的状态。
+
+    关键：目录也要一起还原。WorkBuddy 是按 projects/<转义cwd>/<id>.jsonl
+    找正文的，只把 cwd 改回旧路径、文件却还留在新目录，会话就会打不开——
+    这是最容易被当成「数据丢了」的故障，所以这里先搬文件、再改库。
+    """
     p = BACKUPS / name
     if not p.exists():
         return {"error": "快照不存在"}
     d = json.loads(p.read_text(encoding="utf-8"))
     snap = snapshot("before-restore")
+
+    # 第一步：算出哪些会话的目录和快照里不一致，先把正文搬回去
+    con = connect()
+    now = {r["id"]: dict(r) for r in con.execute(
+        "SELECT id, cwd FROM sessions").fetchall()}
+    con.close()
+
+    back = []
+    for r in d.get("rows") or []:
+        cur = now.get(r["id"])
+        if not cur:
+            continue
+        if rules.norm_path(cur["cwd"] or "") != rules.norm_path(r.get("cwd") or ""):
+            back.append({"id": r["id"], "cwd": r.get("cwd") or ""})
+
+    moved, blocked, moved_ids = 0, [], set()
+    if back:
+        if not IS_WIN:
+            return {"error": "还原会连目录一起搬，这个功能只在 Windows 上可用。"
+                             "标题和状态可以单独改。"}
+        mv = move_sessions(back)
+        if mv.get("error"):
+            return {"error": mv["error"]}
+        moved = mv.get("changed", 0)
+        blocked = mv.get("blocked") or []
+        moved_ids = {m["id"] for m in (mv.get("moved") or [])}
+
+    # 搬不动的会话：保留当前目录，只还原标题和状态，绝不让 cwd 指向空目录
+    keep_cwd = {b["id"] for b in blocked}
+
     con = connect(write=True)
-    changed = 0
+    changed, touched = 0, set()
     try:
         with con:
             for r in d["rows"]:
@@ -2075,8 +2161,9 @@ def restore(name):
                     (r["id"],)).fetchone()
                 if cur is None:
                     continue
+                want_cwd = cur["cwd"] if r["id"] in keep_cwd else (r["cwd"] or "")
                 title_diff = (cur["custom_title"] or "") != (r["custom_title"] or "")
-                cwd_diff = (cur["cwd"] or "") != (r["cwd"] or "")
+                cwd_diff = (cur["cwd"] or "") != want_cwd
                 # 老快照没有 status 字段，这时只还原标题和目录，不动状态
                 want_status = r.get("status")
                 status_diff = (want_status is not None
@@ -2086,16 +2173,19 @@ def restore(name):
                 if status_diff:
                     con.execute(
                         "UPDATE sessions SET custom_title=?, cwd=?, status=? WHERE id=?",
-                        (r["custom_title"], r["cwd"], want_status, r["id"]))
+                        (r["custom_title"], want_cwd, want_status, r["id"]))
                 else:
                     con.execute(
                         "UPDATE sessions SET custom_title=?, cwd=? WHERE id=?",
-                        (r["custom_title"], r["cwd"], r["id"]))
+                        (r["custom_title"], want_cwd, r["id"]))
                 changed += 1
+                touched.add(r["id"])
     finally:
         con.close()
     log_action("还原快照", changed, snap, f"从 {name} 还原")
-    return {"changed": changed, "snapshot": snap, "restored_from": name}
+    return {"changed": len(touched | moved_ids), "snapshot": snap,
+            "restored_from": name,
+            "moved_files": moved, "blocked": blocked, "need_restart": True}
 
 
 # ---------- HTTP ----------
@@ -2164,6 +2254,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, public_config())
             else:
                 self._send(404, {"error": "not found"})
+        except sqlite3.OperationalError as e:
+            self._send(503, {"error": _db_busy_msg(e)})
         except Exception as e:  # noqa: BLE001
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -2174,6 +2266,9 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             self._send(400, {"error": "bad json"})
+            return
+        if not isinstance(body, dict):
+            self._send(400, {"error": "请求格式不对：需要一个 JSON 对象"})
             return
         try:
             if path == "/api/bye":
@@ -2239,6 +2334,9 @@ class Handler(BaseHTTPRequestHandler):
                                                  bool(body.get("archive", True))))
             else:
                 self._send(404, {"error": "not found"})
+        except sqlite3.OperationalError as e:
+            # 最常见的是 database is locked：翻译成用户能自己处理的说明
+            self._send(503, {"error": _db_busy_msg(e)})
         except Exception as e:  # noqa: BLE001
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -2351,24 +2449,50 @@ def pick_port(start, tries=20):
     sys.exit(f"{start} 往后 {tries} 个端口都被占了，换 --port 指定一个")
 
 
+def _fatal(msg: str, code: int = 1):
+    """启动阶段就失败时怎么告诉用户。
+
+    打包成 exe 是 --noconsole，stdout 没有任何人看得到——只 print 的话，
+    用户双击后就是「什么也没发生」。所以打包版一律弹原生提示框。
+    """
+    print(msg)
+    if getattr(sys, "frozen", False) and IS_WIN:
+        try:
+            import ctypes
+            # MB_ICONERROR | MB_SETFOREGROUND，保证从后台启动也能弹到前面
+            ctypes.windll.user32.MessageBoxW(
+                None, msg, "wb-manager 没能启动", 0x10 | 0x10000)
+        except Exception:  # noqa: BLE001
+            pass
+    sys.exit(code)
+
+
 def main():
     global REAL_DB, DB_SOURCE
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--db", help="手动指定 workbuddy.db 路径")
     ap.add_argument("--no-browser", action="store_true")
+    # 允许把 workbuddy.db 直接拖到 exe 上：这时候文件路径是位置参数
+    ap.add_argument("dropped", nargs="?", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
-    REAL_DB, DB_SOURCE = resolve_db(args.db)
+    REAL_DB, DB_SOURCE = resolve_db(args.db or (args.dropped or None))
 
     if not REAL_DB.exists():
-        print(f"[db] 找不到数据库：{REAL_DB}")
-        print(f"[db] 查找依据：{DB_SOURCE}")
-        print("[db] 如果 WorkBuddy 装在别的账户或改过数据目录，用这条命令指定：")
-        print(f'     python wbmanager.py --db "D:\\你的路径\\workbuddy.db"')
-        sys.exit(1)
+        _fatal(
+            "没找到 WorkBuddy 的数据文件：\n"
+            f"{REAL_DB}\n"
+            f"（查找依据：{DB_SOURCE}）\n\n"
+            "两种可能：\n"
+            "1. 这台电脑还没装过 WorkBuddy，或还没用它开过对话\n"
+            "2. WorkBuddy 的数据目录被改过（换了盘 / 换了账户）\n\n"
+            "如果是第 2 种，把这个文件拖到 wb-manager.exe 上，"
+            "或在命令行里指定：\n"
+            '   wb-manager.exe --db "D:\\你的路径\\workbuddy.db"'
+        )
     if not UI.exists():
-        sys.exit(f"找不到界面文件：{UI}")
+        _fatal(f"安装包不完整：找不到界面文件\n{UI}\n\n请重新解压一份完整的压缩包。")
 
     # 启动自检：连不上就别起服务，直接把原因打出来
     try:
@@ -2377,7 +2501,8 @@ def main():
         con.close()
         print(f"[db] 连接正常，{n} 条会话")
     except Exception as e:  # noqa: BLE001
-        sys.exit(f"[db] 打不开数据库：{type(e).__name__}: {e}\n路径：{REAL_DB}")
+        _fatal(f"打不开数据库：{type(e).__name__}: {e}\n\n路径：{REAL_DB}\n"
+               "如果 WorkBuddy 正开着，先退出它再试。")
 
     # 已经开着一个就只把窗口唤出来，绝不起第二个（--port 指定别的端口时不管，方便自测）
     if args.port == 8765:

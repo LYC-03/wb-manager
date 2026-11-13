@@ -126,6 +126,10 @@ def suggest(row, style="emoji"):
     返回 dict: {after, emoji, type_name, why, conflict}
     """
     raw = re.sub(r"\s+", " ", (row.get("custom_title") or row.get("title") or "").strip())
+    if style == "date":
+        # 日期风格每次都往前面拼一个「MM-DD」。不先剥掉旧的，
+        # 就会 10-27 主题 → 10-27 10-27 主题 → 越整理越长。
+        raw = re.sub(r"^\d{2}-\d{2}\s+", "", raw).strip() or raw
     is_auto = bool(row.get("is_background_automation"))
 
     def _fmt(emoji, name):

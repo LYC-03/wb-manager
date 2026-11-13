@@ -1119,6 +1119,14 @@ $('btnOrganizeAll').onclick = async ()=>{
   }catch(e){ toast('检查失败：'+e.message); b.disabled = false; b.textContent = '一键整理'; return; }
   b.disabled = false; b.textContent = '一键整理';
 
+  // 一条都不用改时别弹「改 0 条，确认开始吗」——纯属浪费一次点击
+  if (!(pre.pairs || []).length){
+    toast(pre.skipped_confirm
+      ? `没有能自动改的标题；还有 ${pre.skipped_confirm} 条没认出来，去「需确认」里定`
+      : '没有需要整理的标题，已经都是规范格式了', 4500);
+    return;
+  }
+
   const list = (pre.pairs || []).slice(0, 12).map(p =>
     `  ${p.current} → ${p.suggest}`).join('\n');
   const more = (pre.pairs || []).length > 12 ? `\n  …还有 ${pre.pairs.length - 12} 条` : '';
