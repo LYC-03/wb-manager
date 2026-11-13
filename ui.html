@@ -1560,7 +1560,8 @@ function renderMoveRows(){
     if(!r.to) tag = '<span class="tag">不搬</span>';
     else if(r.to === r.from) tag = '<span class="tag">目录没变</span>';
     else if(r.status === '可搬') tag = '<span class="tag ok">可搬</span>'
-      + (r.new_dir ? ' <span class="tag warn">会新建目录</span>' : '');
+      + (r.create_real_dir ? ' <span class="tag warn">将新建空间文件夹</span>'
+        : (r.new_dir ? ' <span class="tag warn">会新建目录</span>' : ''));
     else if(r.status) tag = `<span class="tag warn">${esc(r.status)}</span>`;
     else tag = '<span class="tag">待检查</span>';
     const live = r.active ? '<span class="tag live">进行中</span> ' : '';

@@ -1740,6 +1740,17 @@ def purge_deleted_files(ids=None):
             "left": len(want) - removed, "skipped": skipped}
 
 
+def bad_target(new_cwd: str) -> str:
+    """目标路径的合法性检查。返回非空表示不能搬，内容是给用户看的原因。"""
+    if not new_cwd:
+        return "没填目标路径"
+    if not re.match(r"^[A-Za-z]:\\", new_cwd):
+        return "要写完整路径，例如 D:\\项目\\新空间"
+    if len(new_cwd) <= 3:          # 只有一个盘符根，如 "D:\"
+        return "不能直接搬到盘符根目录"
+    return ""
+
+
 def preview_move(pairs):
     """只算不执行：把每条会话会怎么搬、会不会被拦，全列出来给用户确认。
 
@@ -1771,6 +1782,8 @@ def preview_move(pairs):
         status, why = "可搬", ""
         if rules.norm_path(old_cwd) == new_cwd:
             status, why = "跳过", "目录没变"
+        elif bad_target(new_cwd):
+            status, why = "跳过", bad_target(new_cwd)
         elif is_active(src):
             status, why = "跳过", "正在使用中，等它闲下来"
         elif not src.exists():
@@ -1785,6 +1798,8 @@ def preview_move(pairs):
             "from_dir": src.parent.name, "to_dir": dst_dir.name,
             "file": str(src), "size": size,
             "new_dir": not dst_dir.is_dir(),   # 目标目录还不存在，搬的时候会新建
+            # 真实文件夹（不是 WorkBuddy 的存储目录）是否已存在：不存在说明是「新建一个空间」
+            "create_real_dir": bool(new_cwd) and not Path(new_cwd).is_dir(),
             "size_h": f"{size/1024/1024:.1f} MB" if size > 1024*1024 else f"{size/1024:.0f} KB",
             "status": status, "why": why,
         })
@@ -1906,6 +1921,11 @@ def move_sessions(pairs):
                 if rules.norm_path(old_cwd) == new_cwd:
                     continue
 
+                bad = bad_target(new_cwd)
+                if bad:
+                    blocked.append({"id": sid, "why": bad})
+                    continue
+
                 src = find_esc_dir(old_cwd) / f"{sid}.jsonl"
                 dst_dir = find_esc_dir(new_cwd)
                 dst = dst_dir / f"{sid}.jsonl"
@@ -1922,6 +1942,9 @@ def move_sessions(pairs):
 
                 size_before = src.stat().st_size
                 try:
+                    # 目标空间对应的真实文件夹也建出来：只改数据库会出现
+                    # 「侧栏有分组、磁盘上没有这个目录」的错位，打开会话时路径是空的
+                    Path(new_cwd).mkdir(parents=True, exist_ok=True)
                     dst_dir.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(src), str(dst))
                 except OSError as e:
