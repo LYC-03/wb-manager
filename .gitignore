@@ -36,3 +36,7 @@ build/
 dist/
 *.spec
 *.exe
+# 自测用的克隆库（含个人会话数据，绝不入库）
+_t*/
+_empty/
+_fresh/
