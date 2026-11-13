@@ -1740,14 +1740,82 @@ def purge_deleted_files(ids=None):
             "left": len(want) - removed, "skipped": skipped}
 
 
+_FIT_CACHE = {}
+
+
+def rule_fit():
+    """拿磁盘上真实存在的目录，反查「路径→目录名」规则还准不准。
+
+    这个规则是从实测反推出来的（C:\\a\\b → C-a-b），不是官方文档。
+    别的用户环境、别的 WorkBuddy 版本都可能不一样。若规则不对还硬搬，
+    会话会在界面上打不开——所以这里先自检，对不上就停用搬家功能。
+
+    返回 {checked, matched, samples}
+    """
+    if _FIT_CACHE:
+        return _FIT_CACHE
+    proj = REAL_DB.parent / "projects"
+    if not proj.is_dir():
+        _FIT_CACHE.update({"checked": 0, "matched": 0, "samples": []})
+        return _FIT_CACHE
+    try:
+        con = connect()
+        rows = con.execute(
+            "SELECT id, cwd FROM sessions WHERE deleted_at IS NULL LIMIT 60").fetchall()
+        con.close()
+    except sqlite3.Error:
+        _FIT_CACHE.update({"checked": 0, "matched": 0, "samples": []})
+        return _FIT_CACHE
+
+    checked = matched = 0
+    samples = []
+    for r in rows:
+        cwd = r["cwd"] or ""
+        if not cwd:
+            continue
+        want = esc_dir_name(cwd)
+        # 先看「按规则算出来的位置」有没有这份文件。有就算规则对——
+        # 同一个会话可能在别处还留着历史副本，不能拿副本反推规则。
+        if (proj / want / f"{r['id']}.jsonl").exists():
+            checked += 1
+            matched += 1
+            continue
+        hits = list(proj.glob(f"*/{r['id']}.jsonl"))
+        if not hits:
+            continue          # 文件都不在，无从判断，不计入样本
+        checked += 1
+        if len(samples) < 3:
+            samples.append({"cwd": cwd, "want": want, "real": hits[0].parent.name})
+    _FIT_CACHE.update({"checked": checked, "matched": matched, "samples": samples})
+    return _FIT_CACHE
+
+
+def rule_trusted():
+    """规则是否可信：样本够、且八成以上对得上。样本太少时按可信处理（不拦新手）。"""
+    fit = rule_fit()
+    if fit["checked"] < 5:
+        return True, ""
+    if fit["matched"] >= fit["checked"] * 0.8:
+        return True, ""
+    s = fit["samples"][0] if fit["samples"] else {}
+    return False, (f"目录命名规则和这台电脑的实际情况对不上"
+                   f"（{fit['matched']}/{fit['checked']} 条相符"
+                   + (f"，例如 {s.get('cwd','')} 实际是 {s.get('real','')}" if s else "")
+                   + "）。搬错会让会话打不开，所以搬家功能已停用；改名、归档不受影响。")
+
+
 def bad_target(new_cwd: str) -> str:
     """目标路径的合法性检查。返回非空表示不能搬，内容是给用户看的原因。"""
     if not new_cwd:
         return "没填目标路径"
+    if new_cwd.startswith("\\\\"):
+        return "网络路径（\\\\服务器\\共享）的目录转义规则没有验证过，容易搬坏，请在 WorkBuddy 里操作"
     if not re.match(r"^[A-Za-z]:\\", new_cwd):
         return "要写完整路径，例如 D:\\项目\\新空间"
     if len(new_cwd) <= 3:          # 只有一个盘符根，如 "D:\"
         return "不能直接搬到盘符根目录"
+    if len(new_cwd) > 180:         # 加上 projects/<转义名>/<id>.jsonl 会顶到系统 260 上限
+        return "路径太长，搬过去可能打不开，换个浅一点的位置"
     return ""
 
 
@@ -1762,6 +1830,12 @@ def preview_move(pairs):
                 "wb_running": wb_running(),
                 "error": "搬目录只在 Windows 上验证过。当前系统的目录转义规则没把握，"
                          "算错会让会话打不开，所以这边不提供。改标题和归档不受影响。"}
+
+    trust, why_not = rule_trusted()
+    if not trust:
+        return {"items": [], "can_move": 0, "blocked": len(pairs),
+                "wb_running": wb_running(), "error": why_not, "rule_unfit": True}
+
     con = connect()
     out = []
     for p in pairs:
@@ -1784,6 +1858,8 @@ def preview_move(pairs):
             status, why = "跳过", "目录没变"
         elif bad_target(new_cwd):
             status, why = "跳过", bad_target(new_cwd)
+        elif len(str(dst)) >= 250:
+            status, why = "跳过", "完整路径太长（Windows 有 260 字符上限），换个浅一点的位置"
         elif is_active(src):
             status, why = "跳过", "正在使用中，等它闲下来"
         elif not src.exists():
@@ -1900,6 +1976,10 @@ def move_sessions(pairs):
     if not IS_WIN:
         return {"error": "搬目录只在 Windows 上验证过，当前系统不支持。"
                          "改标题和归档不受影响。", "changed": 0}
+
+    trust, why_not = rule_trusted()
+    if not trust:
+        return {"error": why_not, "changed": 0, "rule_unfit": True}
 
     running = wb_running()
     snap = snapshot("before-move")

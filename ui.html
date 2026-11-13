@@ -1683,8 +1683,17 @@ $('btnMoveCheck').onclick = async ()=>{
   try{
     const r = await api('/api/move/preview',
       {pairs: todo.map(x=>({id: x.id, cwd: x.to}))});
-    if(r.error){ toast(r.error); }
-    else{
+    if(r.error){
+      // 规则对不上这类问题不能只弹一下就没了，得留在面板上看得到
+      const s = $('moveSum');
+      s.textContent = r.error;
+      s.style.color = 'var(--bad)';
+      s.style.whiteSpace = 'normal';
+      toast(r.error, 8000);
+      MROWS.forEach(t=>{ t.status = ''; t.why = ''; });
+    }else{
+      const s = $('moveSum');
+      s.style.color = ''; s.style.whiteSpace = '';
       r.items.forEach((it, k)=>{
         const t = todo[k];
         if(!t) return;
@@ -1692,8 +1701,10 @@ $('btnMoveCheck').onclick = async ()=>{
         t.why = it.why || '';
         t.size_h = it.size_h || '';
         t.new_dir = it.new_dir;
+        t.create_real_dir = it.create_real_dir;
       });
-      toast(`检查完成：可搬 ${r.can_move} 条，跳过 ${r.blocked} 条`);
+      s.textContent = `可搬 ${r.can_move} 条，跳过 ${r.blocked} 条`;
+      if(r.can_move) toast(`检查完成：可搬 ${r.can_move} 条，跳过 ${r.blocked} 条`);
       if(r.wb_running) toast('WorkBuddy 在运行，正在写的那条会被自动跳过');
     }
     renderMoveRows();
@@ -1720,6 +1731,11 @@ $('btnMoveRun').onclick = async ()=>{
   b.disabled = true; b.textContent = '搬运中…';
   try{
     const r = await api('/api/move', {pairs: todo.map(x=>({id: x.id, cwd: x.to}))});
+    if(r.error){
+      toast(r.error, 9000);
+      b.disabled = false; b.textContent = '确认搬运';
+      return;
+    }
     const blocked = (r.blocked || []).length;
     toast(`搬了 ${r.changed} 条${blocked ? '，跳过 ' + blocked + ' 条' : ''}`);
     closeSheet('movePanel');
