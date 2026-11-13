@@ -45,6 +45,44 @@ HERE = _app_dir()      # 可写：config.json / backups / history.jsonl
 RES = _res_dir()       # 只读：ui.html
 IS_WIN = sys.platform.startswith("win")
 
+
+def _fatal(msg: str, code: int = 1):
+    """启动阶段就失败时怎么告诉用户。
+
+    打包成 exe 是 --noconsole，stdout 没有任何人看得到——只 print 的话，
+    用户双击后就是「什么也没发生」。所以打包版一律弹原生提示框。
+
+    放在文件这么靠前的位置，是因为数据库定位在模块导入时就会跑，
+    等不到 main()——没有可写目录、环境变量指错都要在这一刻说清楚。
+    """
+    print(msg)
+    if getattr(sys, "frozen", False) and IS_WIN:
+        try:
+            import ctypes
+            # MB_ICONERROR | MB_SETFOREGROUND，保证从后台启动也能弹到前面
+            ctypes.windll.user32.MessageBoxW(
+                None, msg, "wb-manager 没能启动", 0x10 | 0x10000)
+        except Exception:  # noqa: BLE001
+            pass
+    sys.exit(code)
+
+
+def check_app_dir_writable():
+    """数据目录能不能写。写不进去就别让它跑到一半再崩。
+
+    config.json / backups / history.jsonl / port.txt 都放在 exe 旁边。
+    放进 C:\\Program Files 这种要管理员权限的目录时，启动写 port.txt 就会
+    抛 PermissionError，--noconsole 下用户看到的是「双击没反应」。
+    所以先试写一个小文件，写不了就当场说清楚。
+    """
+    probe = HERE / ".write-test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
 # 用 pythonw.exe（无窗口启动器）跑时没有控制台，stdout/stderr 是 None，print 会崩。
 # 换成空设备，所有 print 照常安全执行；真正需要看输出时用 python.exe 启动。
 for _s in ("stdout", "stderr"):
@@ -76,21 +114,25 @@ def resolve_config_dir():
     """返回 (配置目录, 命中来源说明)。
 
     按 WorkBuddy 自己的查找顺序走，这样用户把数据放哪都能找到。
-    环境变量指向的目录不存在时不采用——但要告诉用户一声，
-    否则静默回退到 ~/.workbuddy，用户会以为读的就是自己指定的那份。
+    环境变量明确指定了、但那个目录不存在时**直接停下**：静默回退到
+    ~/.workbuddy 的话，用户会以为整理的是自己指定的那份，实际动的是
+    另一份数据——这种「安静地改错库」比报错难发现得多。
     """
-    skipped = []
     for env in CONFIG_ENVS:
         v = (os.environ.get(env) or "").strip()
         if not v:
             continue
         if Path(v).is_dir():
             return Path(v), f"环境变量 {env}"
-        skipped.append(f"{env}={v}（目录不存在，已忽略）")
-    if skipped:
-        print("[db] 注意：以下环境变量指向的目录不存在，已忽略：")
-        for s in skipped:
-            print(f"     {s}")
+        _fatal(
+            "环境变量指向的文件夹不存在：\n"
+            f"  {env} = {v}\n\n"
+            "工具不会自己换成另一份数据——那样你可能整理了半天，"
+            "才发现动的是另一个库。\n\n"
+            "两个办法：\n"
+            "1. 把这个路径改对（数据盘是不是没挂载？），再启动\n"
+            f"2. 删掉这个环境变量，让工具用默认位置（{Path.home() / '.workbuddy'}）"
+        )
     home_dir = Path.home() / ".workbuddy"
     if home_dir.is_dir():
         return home_dir, "用户目录 ~/.workbuddy"
@@ -2449,24 +2491,6 @@ def pick_port(start, tries=20):
     sys.exit(f"{start} 往后 {tries} 个端口都被占了，换 --port 指定一个")
 
 
-def _fatal(msg: str, code: int = 1):
-    """启动阶段就失败时怎么告诉用户。
-
-    打包成 exe 是 --noconsole，stdout 没有任何人看得到——只 print 的话，
-    用户双击后就是「什么也没发生」。所以打包版一律弹原生提示框。
-    """
-    print(msg)
-    if getattr(sys, "frozen", False) and IS_WIN:
-        try:
-            import ctypes
-            # MB_ICONERROR | MB_SETFOREGROUND，保证从后台启动也能弹到前面
-            ctypes.windll.user32.MessageBoxW(
-                None, msg, "wb-manager 没能启动", 0x10 | 0x10000)
-        except Exception:  # noqa: BLE001
-            pass
-    sys.exit(code)
-
-
 def main():
     global REAL_DB, DB_SOURCE
     ap = argparse.ArgumentParser()
@@ -2476,6 +2500,19 @@ def main():
     # 允许把 workbuddy.db 直接拖到 exe 上：这时候文件路径是位置参数
     ap.add_argument("dropped", nargs="?", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    # 数据目录写不进去就别往下走了：备份、历史、port.txt 全靠它
+    if not check_app_dir_writable():
+        _fatal(
+            "程序所在的文件夹不能写入：\n"
+            f"  {HERE}\n\n"
+            "配置、备份和操作历史都要存在这个文件夹里，写不进去就没法用。\n"
+            "最常见的原因是放在了需要管理员权限的位置，比如\n"
+            "  C:\\Program Files\\\n\n"
+            "把 wb-manager.exe 挪到一个普通文件夹再双击，例如：\n"
+            "  D:\\工具\\wb-manager\\\n"
+            "  或者桌面新建一个文件夹"
+        )
 
     REAL_DB, DB_SOURCE = resolve_db(args.db or (args.dropped or None))
 
