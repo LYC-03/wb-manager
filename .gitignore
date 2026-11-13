@@ -18,6 +18,9 @@ __pycache__/
 归类方案.md
 归类结果.md
 
+# 发布用的一次性脚本（只有作者本机用）
+发布到GitHub.bat
+
 # 开发期自用校验脚本（引用了本机工具链路径）
 _check.js
 cdp_check.mjs
