@@ -13,6 +13,7 @@
     只改 custom_title 和 cwd 两个字段，不碰会话内容。
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -90,16 +91,13 @@ for _s in ("stdout", "stderr"):
         setattr(sys, _s, open(os.devnull, "w", encoding="utf-8"))
 
 UI = RES / "ui.html"
-BACKUPS = HERE / "backups"
-NAMING = HERE / "naming"
-HISTORY = HERE / "history.jsonl"
 HISTORY_KEEP = 200          # 只保留最近这些条，文件不会无限长
-CONFIG = HERE / "config.json"
+CONFIG = HERE / "config.json"   # API 配置与库无关，所有库共用一份
 
 sys.path.insert(0, str(HERE))
 import rules  # noqa: E402
 
-MAX_BACKUPS = 20
+MAX_BACKUPS = 50
 # 快照的「写 + 清理旧份」必须串行：两个请求同时进来会算出同一批旧文件，
 # 后一个删到已经不存在的那份，直接把整次操作拖成失败。
 _SNAP_LOCK = threading.Lock()
@@ -151,6 +149,73 @@ def resolve_db(cli_db=None):
 
 
 REAL_DB, DB_SOURCE = resolve_db()
+
+# 备份、操作历史、命名导出都跟「当前这个库」绑定，不跟工具目录绑定。
+# 以前这三样直接放在数据目录根上，一旦用 --db 换了库（或数据盘换位置），
+# 另一套库的东西就串进来了：备份列表里能看见别的库的快照，
+# 点「还原」还会把别的库的标题和目录套到这份库上。
+# 所以按库路径取短哈希分子目录。只有一个库的用户由下面的迁移兜住，观感不变。
+def _per_db_paths(db: Path):
+    """按数据库路径算出这个库自己的备份/命名/历史位置。"""
+    key = hashlib.sha1(str(db).lower().encode("utf-8")).hexdigest()[:8]
+    return (HERE / "backups" / key,                       # backups/<库>/snap-*.json
+            HERE / "naming" / key,                        # naming/<库>/request-*.json
+            HERE / "history" / key / "history.jsonl")     # history/<库>/history.jsonl
+
+
+BACKUPS, NAMING, HISTORY = _per_db_paths(REAL_DB)
+_BOOT_DB = REAL_DB        # 启动时认定的库；main() 里被 --db 改掉时要重新算路径
+
+
+def _migrate_legacy_data() -> None:
+    """把老版本放在数据目录根上的备份/历史/命名包搬进按库分的子目录。
+
+    只在目标里还没有东西时搬一次，搬不动就留着（宁可少搬，不可丢）。
+    不搬的话，升级后用户会发现「我的备份全没了」——其实还在老位置。
+    """
+    legacy_backups = HERE / "backups"
+    if legacy_backups.is_dir() and legacy_backups != BACKUPS:
+        olds = list(legacy_backups.glob("snap-*.json"))
+        if olds:
+            BACKUPS.mkdir(parents=True, exist_ok=True)
+            for f in olds:
+                try:
+                    f.replace(BACKUPS / f.name)
+                except OSError:
+                    pass
+    legacy_hist = HERE / "history.jsonl"
+    if legacy_hist.is_file() and not HISTORY.exists():
+        try:
+            HISTORY.parent.mkdir(parents=True, exist_ok=True)
+            legacy_hist.replace(HISTORY)
+        except OSError:
+            pass
+    legacy_naming = HERE / "naming"
+    if legacy_naming.is_dir() and legacy_naming != NAMING:
+        olds = list(legacy_naming.glob("*.json"))
+        if olds:
+            NAMING.mkdir(parents=True, exist_ok=True)
+            for f in olds:
+                try:
+                    f.replace(NAMING / f.name)
+                except OSError:
+                    pass
+
+
+def _ensure_dirs() -> None:
+    """把当前库要用的目录建出来，后面所有 mkdir(exist_ok=True) 都不会缺父目录。
+
+    写不进去是另一回事，那种情况由 main() 里的 check_app_dir_writable 明确告知。
+    """
+    for d in (BACKUPS, NAMING, HISTORY.parent):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+
+_migrate_legacy_data()
+_ensure_dirs()
 
 
 # ---------- 数据层 ----------
@@ -2387,9 +2452,13 @@ class Handler(BaseHTTPRequestHandler):
 # 页面每 10 秒打一次 /api/ping；关闭窗口时用 sendBeacon 打 /api/bye。
 # 收到 bye 后留 6 秒缓冲（刷新页面会先 bye 再 ping，靠这个缓冲救回来）。
 # 浏览器把后台标签的定时器限流到每分钟一次，所以兜底阈值放到 180 秒。
-_LIVE = {"last": time.time(), "bye": 0.0, "seen": False, "lock": threading.Lock()}
+_LIVE = {"last": time.time(), "bye": 0.0, "seen": False, "t0": time.time(),
+         "lock": threading.Lock()}
 IDLE_GRACE = 6
 IDLE_LIMIT = 180
+# 启动后一直没有页面连过来（浏览器没打开成功、地址没人用）时的兜底：
+# 服务留着是等用户手动打开，但不能永远挂着——那会变成没有界面的幽灵进程。
+NO_PAGE_LIMIT = 300
 
 
 def touch() -> None:
@@ -2419,7 +2488,12 @@ def idle_reason() -> str:
     with _LIVE["lock"]:
         now = time.time()
         if not _LIVE["seen"]:
-            return ""      # 还没有页面连过，不自动退出
+            # 还没有页面连过：多半是浏览器没自动打开，用户可能正在手动开。
+            # 给一段时间等；过了还没人来就退出，别留一个没有界面的进程。
+            if now - _LIVE["t0"] >= NO_PAGE_LIMIT:
+                mins = max(1, NO_PAGE_LIMIT // 60)
+                return f"启动后 {mins} 分钟一直没打开页面"
+            return ""      # 还没超时，继续等
         last, bye = _LIVE["last"], _LIVE["bye"]
     if bye and now - bye >= IDLE_GRACE and now - last >= IDLE_GRACE:
         return "页面已关闭"
@@ -2456,9 +2530,14 @@ def running_url() -> str:
     return ""
 
 
-def open_app_window(url: str) -> None:
+def open_app_window(url: str) -> bool:
     """优先 Edge/Chrome 的 --app 模式：没有地址栏和标签页，观感就是桌面应用。
-    都找不到再退回系统默认浏览器。"""
+    都找不到再退回系统默认浏览器。
+
+    返回有没有真的打开。全都失败时调用方要把地址直接摆到用户面前——
+    否则（尤其打包版无控制台）用户看到的是「双击没反应」，
+    而进程还在后台开着，只能去任务管理器里找。
+    """
     candidates = [shutil.which("msedge"), shutil.which("chrome")]
     candidates += [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -2471,10 +2550,37 @@ def open_app_window(url: str) -> None:
             subprocess.Popen([exe, f"--app={url}"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print("已用应用窗口打开（浏览器 --app 模式）")
-            return
+            return True
         except OSError:
             continue
-    webbrowser.open(url)
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:  # noqa: BLE001  没有可用浏览器时会抛 webbrowser.Error
+        return False
+
+
+def _no_browser_hint(url: str) -> None:
+    """一个浏览器都没打开成功：把地址直接给用户，别让人对着空气猜。
+
+    这里不退出进程——服务本身是好的，用户手动打开地址就能用。
+    所以不复用 _fatal()（那个会 sys.exit）。
+    """
+    msg = (
+        "没能自动打开浏览器。\n\n"
+        "请手动打开下面这个地址（复制到浏览器地址栏）：\n"
+        f"{url}\n\n"
+        "Edge 或 Chrome 都可以。页面一打开就能用；\n"
+        "关掉页面后，这个程序几秒内会自己退出。"
+    )
+    print(msg)
+    if getattr(sys, "frozen", False) and IS_WIN:
+        try:
+            import ctypes
+            # MB_ICONINFORMATION | MB_SETFOREGROUND：好消息，不用红色错误图标
+            ctypes.windll.user32.MessageBoxW(
+                None, msg, "wb-manager 已启动", 0x40 | 0x10000)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def pick_port(start, tries=20):
@@ -2492,7 +2598,7 @@ def pick_port(start, tries=20):
 
 
 def main():
-    global REAL_DB, DB_SOURCE
+    global REAL_DB, DB_SOURCE, BACKUPS, NAMING, HISTORY
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--db", help="手动指定 workbuddy.db 路径")
@@ -2515,6 +2621,13 @@ def main():
         )
 
     REAL_DB, DB_SOURCE = resolve_db(args.db or (args.dropped or None))
+
+    # --db / 拖进来的库 和启动时认定的不是同一个：备份、历史、命名也要跟着换。
+    # 不换的话会往「默认库」的目录里写另一个库的快照，照样是串库。
+    # 这里不做老结构迁移——老版本那个库才是默认库，迁移只归它。
+    if REAL_DB != _BOOT_DB:
+        BACKUPS, NAMING, HISTORY = _per_db_paths(REAL_DB)
+        _ensure_dirs()
 
     if not REAL_DB.exists():
         _fatal(
@@ -2546,8 +2659,8 @@ def main():
         u = running_url()
         if u:
             print(f"已经在运行：{u}")
-            if not args.no_browser:
-                open_app_window(u)
+            if not args.no_browser and not open_app_window(u):
+                _no_browser_hint(u)
             return
 
     port = pick_port(args.port)
@@ -2567,7 +2680,10 @@ def main():
     # 页面一关就自动退出，不在后台常驻（没人连过页面时不会退，自测不受影响）
     threading.Thread(target=watch_idle, args=(srv,), daemon=True).start()
     if not args.no_browser:
-        threading.Timer(0.6, lambda: open_app_window(url)).start()
+        def _open():
+            if not open_app_window(url):
+                _no_browser_hint(url)
+        threading.Timer(0.6, _open).start()
 
     try:
         srv.serve_forever()

@@ -2,8 +2,9 @@
 config.json
 rules_local.py
 backups/
-history.jsonl
 naming/
+history/
+history.jsonl
 incident-backup/
 shots/
 port.txt
@@ -20,6 +21,7 @@ __pycache__/
 
 # 发布用的一次性脚本（只有作者本机用）
 发布到GitHub.bat
+交付说明_*.html
 
 # 开发期自用校验脚本（引用了本机工具链路径）
 _check.js

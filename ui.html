@@ -466,7 +466,7 @@ tbody tr{animation:rowfade .15s ease-out}
       <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">备份与还原</h2>
       <p class="note" id="bnote" style="margin-bottom:10px"></p>
       <div class="bar" style="margin-bottom:10px">
-        <button class="btn ghost" id="btnBackupsCleanup">一键清理旧备份（只留最近 20 份）</button>
+        <button class="btn ghost" id="btnBackupsCleanup">一键清理旧备份</button>
       </div>
       <ul class="blist" id="blist"></ul>
   </div>
@@ -693,8 +693,8 @@ let SEL = new Set();
 let FILTER = 'change';
 let Q = '';
 let SORT = 'time';
-// 与后端 MAX_BACKUPS 保持一致：快照最多自动留 20 份
-const MAX_SNAP = 20;
+// 与后端 MAX_BACKUPS 保持一致：快照最多自动留 50 份
+const MAX_SNAP = 50;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -1039,7 +1039,11 @@ function renderBackups(list){
   const n = (list||[]).length;
   // 快照超过保留数就亮出一键清理
   const bc = $('btnBackupsCleanup');
-  if (bc) bc.hidden = n <= MAX_SNAP;
+  if (bc) {
+    bc.hidden = n <= MAX_SNAP;
+    // 文案跟着 MAX_SNAP 走，改上限时不用再回来改这个按钮
+    bc.textContent = `一键清理旧备份（只留最近 ${MAX_SNAP} 份）`;
+  }
   const kb = (list||[]).reduce((s,b)=>s+(b.size||0),0)/1024;
   $('bnote').innerHTML = n
     ? `下面每一行都是一个「存档点」：你每次改名、移空间、归档之前，工具都会自动把当时的全部标题和目录存一份。
