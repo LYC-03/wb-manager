@@ -838,7 +838,7 @@ function renderFilterNote(){
     if (b) b.onclick = archiveOldAuto;
   }else if (FILTER === 'archived'){
     n.hidden = false;
-    n.innerHTML = `<b>已归档的会话</b>：从侧栏收起来了，数据都在。
+    n.innerHTML = `<b>已归档的会话</b>：从侧栏藏起来了，数据都在。
       在 WorkBuddy 里这叫「归档的任务」，在 <b>设置</b> 页能找到。
       这里勾选后点底部「取消归档」，就能放回侧栏。`;
   }else{
@@ -1197,15 +1197,14 @@ $('btnBackup').onclick = async ()=>{
     const r = await api('/api/backup', {});
     await load();
     // 备份完切到「维护 · 备份」视图，让用户看到现在有几份、占多少
-    showView('maint');
-    await loadHistory();
+    await enterMaint();
     toast('已备份 1 份，可还原或删除，见「备份与还原」');
   }
   catch(e){ toast('失败：'+e.message); }
 };
 
 $('btnReload').onclick = ()=>load().then(()=>toast('已刷新'));
-$('btnPanel').onclick = ()=>{ showView('maint'); loadHistory(); };
+$('btnPanel').onclick = ()=>enterMaint();
 
 /* ---------- AI 命名 ---------- */
 // 支持 ?ai=1 直达，方便收藏和分享
@@ -1760,8 +1759,16 @@ function showView(v){
   document.querySelectorAll('#tabs .tab').forEach(t=>t.classList.toggle('on', t.dataset.view === v));
   window.scrollTo(0, 0);
 }
+/* 进「维护」视图顺手把三块数据拉一遍。
+   顶部 tab 和主页入口都走这里——只 showView 不拉数据的话，
+   「路径写法分裂 / 存储占用 / 空间体检」会一直停在「正在检查…」。 */
+async function enterMaint(){
+  showView('maint');
+  await Promise.all([loadPaths(), loadStorage(), loadHistory()]);
+}
+
 document.querySelectorAll('#tabs .tab').forEach(t=>{
-  t.onclick = ()=>showView(t.dataset.view);
+  t.onclick = ()=> (t.dataset.view === 'maint' ? enterMaint() : showView(t.dataset.view));
 });
 
 /* ---------- 主页 ---------- */
@@ -1816,10 +1823,7 @@ $('btnHomeAll').onclick = ()=>$('btnMaint').click();
 
 /* ---------- 维护 ---------- */
 // 「维护」不再弹浮层，切到维护视图（路径统一 / 存储占用 / 备份还原 / 操作历史都在里面）
-$('btnMaint').onclick = async ()=>{
-  showView('maint');
-  await Promise.all([loadPaths(), loadStorage(), loadHistory()]);
-};
+$('btnMaint').onclick = ()=>enterMaint();
 
 /* ---------- 操作历史 ---------- */
 async function loadHistory(){

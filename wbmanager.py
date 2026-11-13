@@ -1,6 +1,6 @@
 """wb-manager：WorkBuddy 会话管理器（独立工具，不依赖插件）。
 
-直接读写 WorkBuddy 的数据库，能干对话里干不了的事：批量改标题、搬目录、归档。
+直接读写 WorkBuddy 的数据库，能干对话里干不了的事：批量改标题、移到空间、归档。
 
 启动：
     python wbmanager.py            # 起服务并自动开浏览器
@@ -307,7 +307,7 @@ def snapshot(tag="manual"):
 def undo_snapshot(name):
     """撤回某一步操作。
 
-    关键差别：改标题、归档只要改数据库；但归类改的是 cwd，
+    关键差别：改标题、归档只要改数据库；但移到空间改的是 cwd，
     光把 cwd 改回去而磁盘文件不动，会话就点不开了——WorkBuddy 是按
     projects/<目录名>/<会话id>.jsonl 找正文的。
 
@@ -337,7 +337,7 @@ def undo_snapshot(name):
     blocked = []
     if back:
         if not IS_WIN:
-            return {"error": "撤回归类要搬动磁盘文件，这个功能只在 Windows 上可用"}
+            return {"error": "撤回移到空间要搬动磁盘文件，这个功能只在 Windows 上可用"}
         r = move_sessions(back)
         if r.get("error"):
             return {"error": r["error"]}
@@ -1623,7 +1623,7 @@ def archive_sessions(ids, archive=True):
                     blocked.append({"id": sid, "why": "数据库里没有这条会话"})
                     continue
                 if row["deleted_at"] is not None:
-                    blocked.append({"id": sid, "why": "这条已在回收站，先恢复再收起"})
+                    blocked.append({"id": sid, "why": "这条已在回收站，先恢复再归档"})
                     continue
                 cur = (row["status"] or "").lower()
 
@@ -1644,7 +1644,7 @@ def archive_sessions(ids, archive=True):
         con.close()
 
     _save_orig(orig)
-    log_action("收起" if archive else "取消收起", changed, snap,
+    log_action("归档" if archive else "取消归档", changed, snap,
                f"{len(blocked)} 条被跳过" if blocked else "")
     return {"changed": changed, "snapshot": snap, "blocked": blocked,
             "need_restart": changed > 0}
@@ -1656,7 +1656,7 @@ def organize_all(dry_run=False):
     只动有把握的，三类跳过：
     - 需确认（规则没认出的）——留给你人工或 AI 起名
     - 正在使用的——文件 3 分钟内被写过
-    - 已收起的——收起的东西不折腾
+    - 已归档的——归档的东西不折腾
     apply_titles 内部会先自动快照，改坏可撤。
     dry_run=True 时只返回「将要改什么」，不写任何东西——给检查窗口用。
     """
@@ -1878,7 +1878,7 @@ def preview_move(pairs):
     if not IS_WIN:
         return {"items": [], "can_move": 0, "blocked": len(pairs),
                 "wb_running": wb_running(),
-                "error": "搬目录只在 Windows 上验证过。当前系统的目录转义规则没把握，"
+                "error": "移到空间只在 Windows 上验证过。当前系统的目录转义规则没把握，"
                          "算错会让会话打不开，所以这边不提供。改标题和归档不受影响。"}
 
     trust, why_not = rule_trusted()
@@ -2024,7 +2024,7 @@ def move_sessions(pairs):
         return {"changed": 0, "snapshot": None, "blocked": []}
 
     if not IS_WIN:
-        return {"error": "搬目录只在 Windows 上验证过，当前系统不支持。"
+        return {"error": "移到空间只在 Windows 上验证过，当前系统不支持。"
                          "改标题和归档不受影响。", "changed": 0}
 
     trust, why_not = rule_trusted()

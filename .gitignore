@@ -30,6 +30,7 @@ demo-workspace/
 
 # 自用验收脚本（含本机路径，不入库）
 cdp_ux.mjs
+shot_v2.mjs
 
 # PyInstaller 打包产物（自己构建，不入库）
 build/
