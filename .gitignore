@@ -28,6 +28,11 @@ cdp_check3.mjs
 # 演示环境（make_demo_env.py 的产物）
 demo-workspace/
 
-# 一次性修复/自用验收脚本（含本机路径，不入库）
-fix_merge.py
+# 自用验收脚本（含本机路径，不入库）
 cdp_ux.mjs
+
+# PyInstaller 打包产物（自己构建，不入库）
+build/
+dist/
+*.spec
+*.exe

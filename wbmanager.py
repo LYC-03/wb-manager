@@ -28,9 +28,30 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-HERE = Path(__file__).resolve().parent
+def _app_dir() -> Path:
+    """数据目录：配置、备份、历史都放这里，跟着 exe（或脚本）走。"""
+    if getattr(sys, "frozen", False):          # 已打包成 exe
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _res_dir() -> Path:
+    """只读资源目录：开发时就是代码目录，打包后是临时解包目录。"""
+    base = getattr(sys, "_MEIPASS", None)
+    return Path(base) if base else Path(__file__).resolve().parent
+
+
+HERE = _app_dir()      # 可写：config.json / backups / history.jsonl
+RES = _res_dir()       # 只读：ui.html
 IS_WIN = sys.platform.startswith("win")
-UI = HERE / "ui.html"
+
+# 用 pythonw.exe（无窗口启动器）跑时没有控制台，stdout/stderr 是 None，print 会崩。
+# 换成空设备，所有 print 照常安全执行；真正需要看输出时用 python.exe 启动。
+for _s in ("stdout", "stderr"):
+    if getattr(sys, _s) is None:
+        setattr(sys, _s, open(os.devnull, "w", encoding="utf-8"))
+
+UI = RES / "ui.html"
 BACKUPS = HERE / "backups"
 NAMING = HERE / "naming"
 HISTORY = HERE / "history.jsonl"
@@ -1994,8 +2015,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         try:
+            touch()   # 有请求就说明界面还活着
             if path in ("/", "/index.html"):
                 self._send(200, UI.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+            elif path == "/api/ping":
+                ping()
+                self._send(200, {"ok": True})
             elif path == "/api/state":
                 items = load_sessions()
                 self._send(200, {"stats": stats(items), "items": items,
@@ -2048,6 +2073,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "bad json"})
             return
         try:
+            if path == "/api/bye":
+                # 页面关闭时 sendBeacon 打过来，几秒后服务自己退
+                say_bye()
+                self._send(200, {"ok": True})
+                return
+            touch()
             if path == "/api/apply":
                 self._send(200, apply_titles(body.get("pairs") or []))
             elif path == "/api/move":
@@ -2109,6 +2140,100 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
 
+# ---------- 存活心跳：页面一关就自己退，不在后台白占内存 ----------
+# 页面每 10 秒打一次 /api/ping；关闭窗口时用 sendBeacon 打 /api/bye。
+# 收到 bye 后留 6 秒缓冲（刷新页面会先 bye 再 ping，靠这个缓冲救回来）。
+# 浏览器把后台标签的定时器限流到每分钟一次，所以兜底阈值放到 180 秒。
+_LIVE = {"last": time.time(), "bye": 0.0, "seen": False, "lock": threading.Lock()}
+IDLE_GRACE = 6
+IDLE_LIMIT = 180
+
+
+def touch() -> None:
+    """普通请求：只把「最后一次活动」往后推。"""
+    with _LIVE["lock"]:
+        _LIVE["last"] = time.time()
+        _LIVE["bye"] = 0.0
+
+
+def ping() -> None:
+    """页面心跳：从这一刻起才启用「关掉就退出」的判定。
+    没人 ping 过（自测、脚本调用）就永远不自动退，避免误杀。"""
+    with _LIVE["lock"]:
+        _LIVE["last"] = time.time()
+        _LIVE["bye"] = 0.0
+        _LIVE["seen"] = True
+
+
+def say_bye() -> None:
+    with _LIVE["lock"]:
+        if not _LIVE["bye"]:
+            _LIVE["bye"] = time.time()
+
+
+def idle_reason() -> str:
+    """返回非空字符串表示该关掉服务了。"""
+    with _LIVE["lock"]:
+        now = time.time()
+        if not _LIVE["seen"]:
+            return ""      # 还没有页面连过，不自动退出
+        last, bye = _LIVE["last"], _LIVE["bye"]
+    if bye and now - bye >= IDLE_GRACE and now - last >= IDLE_GRACE:
+        return "页面已关闭"
+    if now - last >= IDLE_LIMIT:
+        return f"已经 {IDLE_LIMIT} 秒没有页面连着"
+    return ""
+
+
+def watch_idle(srv) -> None:
+    while True:
+        time.sleep(1.0)
+        why = idle_reason()
+        if why:
+            print(f"\n[{why}]，服务自动退出")
+            try:
+                srv.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+
+def running_url() -> str:
+    """上次开着的服务还在不在。在就把地址给它，不重复起第二个。"""
+    try:
+        p = int((HERE / "port.txt").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return ""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{p}/api/ping", timeout=1.5) as r:
+            if r.status == 200:
+                return f"http://127.0.0.1:{p}/"
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def open_app_window(url: str) -> None:
+    """优先 Edge/Chrome 的 --app 模式：没有地址栏和标签页，观感就是桌面应用。
+    都找不到再退回系统默认浏览器。"""
+    candidates = [shutil.which("msedge"), shutil.which("chrome")]
+    candidates += [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    ]
+    for exe in candidates:
+        if not exe or not Path(exe).exists():
+            continue
+        try:
+            subprocess.Popen([exe, f"--app={url}"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("已用应用窗口打开（浏览器 --app 模式）")
+            return
+        except OSError:
+            continue
+    webbrowser.open(url)
+
+
 def pick_port(start, tries=20):
     """端口被占就往后找，避免撞上别的程序。"""
     import socket
@@ -2151,6 +2276,15 @@ def main():
     except Exception as e:  # noqa: BLE001
         sys.exit(f"[db] 打不开数据库：{type(e).__name__}: {e}\n路径：{REAL_DB}")
 
+    # 已经开着一个就只把窗口唤出来，绝不起第二个（--port 指定别的端口时不管，方便自测）
+    if args.port == 8765:
+        u = running_url()
+        if u:
+            print(f"已经在运行：{u}")
+            if not args.no_browser:
+                open_app_window(u)
+            return
+
     port = pick_port(args.port)
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
@@ -2165,33 +2299,20 @@ def main():
     print(f"数据库：{REAL_DB}  （来源：{DB_SOURCE}）")
     print("按 Ctrl+C 停止")
 
-    def open_app_window():
-        """优先 Edge/Chrome 的 --app 模式：没有地址栏和标签页，观感就是桌面应用。
-
-        都找不到再退回系统默认浏览器。"""
-        candidates = [shutil.which("msedge"), shutil.which("chrome")]
-        candidates += [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        ]
-        for exe in candidates:
-            if not exe or not Path(exe).exists():
-                continue
-            try:
-                subprocess.Popen([exe, f"--app={url}"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                print("已用应用窗口打开（浏览器 --app 模式）")
-                return
-            except OSError:
-                continue
-        webbrowser.open(url)
-
+    # 页面一关就自动退出，不在后台常驻（没人连过页面时不会退，自测不受影响）
+    threading.Thread(target=watch_idle, args=(srv,), daemon=True).start()
     if not args.no_browser:
-        threading.Timer(0.6, open_app_window).start()
+        threading.Timer(0.6, lambda: open_app_window(url)).start()
+
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止")
+    finally:
+        try:
+            (HERE / "port.txt").unlink()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

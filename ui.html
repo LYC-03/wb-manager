@@ -2450,6 +2450,18 @@ load().catch(e=>{
   if(s === 'ws') setTimeout(()=>$('btnWs').click(), 400);
   if(q.get('selftest') === '1') setTimeout(runSelftest, 500);
 });
+
+/* ---------- 存活心跳：窗口关掉几秒后，后台进程自己退出 ---------- */
+/* 页面每 10 秒报一次活；关窗/刷新时发 bye，后端等 6 秒收不到 ping 就退。
+   刷新会先 bye 再 ping，所以不会被误杀。 */
+(function keepAlive(){
+  const beat = ()=>{ fetch('/api/ping', {cache:'no-store'}).catch(()=>{}); };
+  beat();
+  setInterval(beat, 10000);
+  window.addEventListener('pagehide', ()=>{
+    try{ navigator.sendBeacon('/api/bye'); }catch(e){}
+  });
+})();
 </script>
 </body>
 </html>
