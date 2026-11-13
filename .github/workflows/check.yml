@@ -1,0 +1,53 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 语法能过：改代码时最常见的坏法是少个括号，这类问题不该等到用户双击才发现
+      - name: 检查 Python 语法
+        run: python -m py_compile wbmanager.py rules.py wbact.py fix_merge.py make_demo_env.py
+
+      # README 里引用的截图/图标必须真实存在，否则发布出去是破图
+      - name: 检查 README 引用的文件
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path('.')
+          bad = []
+          for m in re.finditer(r'!\[[^\]]*\]\(([^)]+)\)', (root / 'README.md').read_text(encoding='utf-8')):
+              target = m.group(1)
+              if target.startswith(('http://', 'https://')):
+                  continue
+              if not (root / target).exists():
+                  bad.append(target)
+          if bad:
+              print('README 引用了不存在的文件：', bad)
+              sys.exit(1)
+          print('README 图片引用完整')
+          PY
+
+      # 这个工具只支持 Windows：确认代码里没有悄悄删掉平台判断
+      - name: 确认 Windows 限制还在
+        run: |
+          python - <<'PY'
+          import pathlib, sys
+          src = pathlib.Path('wbmanager.py').read_text(encoding='utf-8')
+          need = ['IS_WIN', 'rule_trusted']
+          miss = [k for k in need if k not in src]
+          if miss:
+              print('缺少平台保护：', miss)
+              sys.exit(1)
+          print('平台保护仍在')
+          PY
