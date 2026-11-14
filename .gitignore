@@ -23,6 +23,11 @@ __pycache__/
 发布到GitHub.bat
 交付说明_*.html
 
+# 发布时填的仓库元数据（描述/话题/发行说明，UTF-8 单独放，避开 bat 的 GBK 解析）
+_repo_meta.json
+_repo_topics.json
+_release_notes.md
+
 # 开发期自用校验脚本（引用了本机工具链路径）
 _check.js
 cdp_check.mjs
