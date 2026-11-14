@@ -23,6 +23,7 @@ __pycache__/
 发布到GitHub.bat
 交付说明_*.html
 推广规划_*.html
+执行步骤_*.html
 
 # 发布时填的仓库元数据（描述/话题/发行说明，UTF-8 单独放，避开 bat 的 GBK 解析）
 _repo_meta.json
