@@ -36,6 +36,33 @@ h1{font-size:clamp(19px,3vw,24px);font-weight:600;letter-spacing:-.02em;line-hei
 .stat .d{font-size:12px;color:var(--ink3);margin-top:1px;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
 
+/* 会话整理页：左边一条「最近 / 分组」导航，右边是原来的筛选和表格。
+   窄屏退回单列，导航变成横向可滑的一排——手机上也顺手。 */
+.sess-wrap{display:grid;grid-template-columns:204px minmax(0,1fr);gap:18px;align-items:start}
+.rail{position:sticky;top:12px;background:var(--card);border:1px solid var(--line);
+  border-radius:var(--r14);padding:10px 8px 16px;max-height:calc(100vh - 96px);overflow:auto}
+.rail-h{font-size:11.5px;color:var(--ink3);font-weight:600;letter-spacing:.4px;
+  padding:9px 10px 5px;display:flex;align-items:center;gap:6px}
+.rail-item{display:flex;align-items:center;gap:8px;width:100%;appearance:none;
+  border:0;background:transparent;font:inherit;font-size:13.5px;color:var(--ink);
+  text-align:left;padding:6px 10px;border-radius:var(--r8);cursor:pointer;min-height:34px}
+.rail-item:hover{background:var(--soft)}
+.rail-item[aria-current="true"]{background:var(--ink);color:#fff}
+.rail-item[aria-current="true"] .n{color:rgba(255,255,255,.72)}
+.rail-item .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-item .n{font-size:12px;color:var(--ink3);flex:none;font-variant-numeric:tabular-nums}
+.rail-item .pin{flex:none;width:5px;height:5px;border-radius:50%;background:var(--blue)}
+.rail-empty{font-size:12.5px;color:var(--ink3);padding:6px 10px 10px;line-height:1.6}
+@media (max-width:900px){
+  .sess-wrap{grid-template-columns:1fr;gap:10px}
+  .rail{position:static;max-height:none;display:flex;gap:6px;overflow-x:auto;
+    border-radius:var(--r14);padding:7px;scrollbar-width:none}
+  .rail::-webkit-scrollbar{display:none}
+  .rail-h{display:none}
+  .rail-item{width:auto;white-space:nowrap;min-height:40px;padding:7px 12px}
+  .rail-empty{display:none}
+}
+
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .chip{appearance:none;font:inherit;font-size:14px;padding:8px 14px;min-height:44px;
   border:1px solid var(--line);background:var(--card);color:var(--ink2);
@@ -378,7 +405,11 @@ tbody tr{animation:rowfade .15s ease-out}
 <main id="viewSessions" class="view">
   <div class="stats" id="stats"></div>
 
-  <div class="bar" id="filters"></div>
+  <div class="sess-wrap">
+    <aside class="rail" id="spaceRail" aria-label="最近与分组"></aside>
+
+    <div class="sess-main">
+    <div class="bar" id="filters"></div>
 
   <p class="note" id="filterNote" hidden
      style="margin:0 0 8px;background:var(--blue-bg);border-radius:var(--r8);
@@ -418,6 +449,8 @@ tbody tr{animation:rowfade .15s ease-out}
       </table>
     </div>
     <div class="empty" id="empty" hidden>这个筛选下没有会话</div>
+  </div>
+    </div>
   </div>
 </main>
 
@@ -693,6 +726,10 @@ let SEL = new Set();
 let FILTER = 'change';
 let Q = '';
 let SORT = 'time';
+/* 左栏选的「空间」。空字符串=全部；'__recent'=最近 7 天活跃；其余是空间名。
+   它和上面的 FILTER 是两个维度：FILTER 筛状态（待改/已归档…），SPACE 筛归属。 */
+let SPACE = '';
+const RECENT_DAYS = 7;
 // 与后端 MAX_BACKUPS 保持一致：快照最多自动留 50 份
 const MAX_SNAP = 50;
 
@@ -788,7 +825,7 @@ function renderStats(){
     ['定时任务', s.auto, '每天刷一条'],
     ['待改标题', s.need_change, '格式不合规'],
     ['重名冗余', s.dup_extra ?? 0, (s.dup_groups||0) + ' 组同名'],
-    ['目录分组', s.groups, s.conflict ? (s.conflict+' 条待确认') : ''],
+    ['空间分组', s.groups, s.conflict ? (s.conflict+' 条待确认') : ''],
   ];
   const html = cards.map(([k,v,d])=>
     `<div class="stat"><div class="k">${esc(k)}</div>
@@ -876,6 +913,13 @@ function filtered(){
   else if (FILTER==='manual') arr = it.filter(x=>!x.auto && !x.archived);
   else if (FILTER==='conflict') arr = it.filter(x=>x.conflict && !x.archived);
   else arr = it.filter(x=>!x.archived);
+  // 左栏的空间筛选，在状态筛选之上再过一道
+  if (SPACE === '__recent'){
+    const cut = Date.now() - RECENT_DAYS * 86400000;
+    arr = arr.filter(x => (x.last_active || 0) >= cut);
+  } else if (SPACE){
+    arr = arr.filter(x => ((x.space || '').trim() || '未归属') === SPACE);
+  }
   if (SORT === 'title') arr = [...arr].sort((a,b)=>a.current.localeCompare(b.current,'zh-CN'));
   else if (SORT === 'dir') arr = [...arr].sort((a,b)=>
     (a.dir||'').localeCompare(b.dir||'','zh-CN') || (b.updated_at||0)-(a.updated_at||0));
@@ -892,6 +936,51 @@ function keyword(arr){
     (x.dir||'').toLowerCase().includes(q) ||
     (x.why||'').toLowerCase().includes(q)
   );
+}
+
+/* 左栏：最近 + 按空间分组。
+   空间是 WorkBuddy 新版侧栏的分组单位，我们直接读它的 spaces 数据，
+   不自己另起一套，免得两边各说各话。 */
+function renderSpaceRail(){
+  const el = $('spaceRail');
+  if (!el) return;
+  const it = STATE.items || [];
+  const alive = it.filter(x=>!x.archived);
+  const cut = Date.now() - RECENT_DAYS * 86400000;
+  const recent = alive.filter(x => (x.last_active || 0) >= cut).length;
+
+  const map = new Map();
+  alive.forEach(x=>{
+    const key = (x.space || '').trim() || '未归属';
+    if (!map.has(key)) map.set(key, { name: key, n: 0, pinned: !!x.space_pinned });
+    map.get(key).n++;
+  });
+  const spaces = [...map.values()].sort((a,b)=>
+    (b.pinned - a.pinned) || (b.n - a.n) || a.name.localeCompare(b.name, 'zh-CN'));
+
+  const item = (key, label, n, pin)=>`
+    <button class="rail-item" data-space="${esc(key)}" aria-current="${SPACE===key}">
+      ${pin ? '<span class="pin" title="在 WorkBuddy 里置顶了"></span>' : ''}
+      <span class="t" title="${esc(label)}">${esc(label)}</span>
+      <span class="n">${n}</span>
+    </button>`;
+
+  el.innerHTML =
+    `<div class="rail-h">最近</div>` +
+    item('', '全部会话', alive.length, false) +
+    item('__recent', `最近 ${RECENT_DAYS} 天`, recent, false) +
+    `<div class="rail-h">分组（空间）</div>` +
+    (spaces.length
+      ? spaces.map(s=>item(s.name, s.name, s.n, s.pinned)).join('')
+      : '<div class="rail-empty">这个库里还没有空间分组。</div>');
+
+  el.querySelectorAll('.rail-item').forEach(b=>{
+    b.onclick = ()=>{
+      SPACE = b.dataset.space || '';
+      SEL.clear();          // 换了分组就别带着上一组的勾选，免得误操作
+      renderSpaceRail(); renderTable(); updateBar();
+    };
+  });
 }
 
 function renderTable(){
@@ -921,7 +1010,7 @@ function renderTable(){
       ${sugCell}
       <td class="dir" title="${esc(x.cwd)}（点击可单独移到别的工作空间）"
         style="cursor:pointer;text-decoration:underline dotted var(--ink3);text-underline-offset:3px"
-        data-moveone="${i}">${esc(x.dir)}</td>
+        data-moveone="${i}">${esc(x.space || x.dir)}</td>
       <td><span class="tag" ${x.auto ? `title="定时任务的格式是固定的，不换类型"` : `data-tpick="${i}" title="点击换类型" style="cursor:pointer"`}>${esc(x.emoji)} ${esc(x.type)}</span></td>
       <td class="dir" title="${esc(x.why)}">${live}${esc(x.why)}</td>
     </tr>`;
@@ -1019,7 +1108,7 @@ async function load(){
       warn.hidden = true;
     }
   }
-  renderStats(); renderFilters(); renderTable(); updateBar(); renderBackups(d.backups);
+  renderSpaceRail(); renderStats(); renderFilters(); renderTable(); updateBar(); renderBackups(d.backups);
   renderHome();
 }
 

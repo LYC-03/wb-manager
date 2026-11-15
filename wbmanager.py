@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -273,15 +274,78 @@ def _is_active(row, now, file_of):
     return ""
 
 
+def space_for_cwd(con, cwd, create=True):
+    """取这个目录在 WorkBuddy 里对应的空间 id。
+
+    新版本（spaces 表 + sessions.space_id）侧栏是按「空间」分组的，不再按
+    cwd 字符串分组。所以改目录必须连 space_id 一起改：只改 cwd 的话，文件
+    搬走了、界面上那条会话还挂在旧空间下，两边对不上，用户会以为白搬了。
+
+    找不到对应空间就照它自己的规则补一个（name 取目录尾名、source_kind=seed）。
+    老版本没有 spaces 表 → 返回 None，调用方就只改 cwd，行为和以前一样。
+    """
+    target = rules.norm_path(cwd or "").lower()
+    if not target:
+        return None
+    try:
+        for r in con.execute(
+                "SELECT id, create_folder_path, primary_folder_path FROM spaces"
+                " WHERE deleted_at < 0"):
+            for p in (r["create_folder_path"], r["primary_folder_path"]):
+                # 同一个目录被写成正反斜杠两种样子也算同一个空间
+                if p and rules.norm_path(p).lower() == target:
+                    return r["id"]
+
+        if not create:
+            return None
+
+        # user_id / device_id 是 WorkBuddy 自己的身份，照抄一份现成的，别猜
+        base = con.execute(
+            "SELECT user_id, device_id FROM spaces WHERE deleted_at < 0"
+            " ORDER BY created_at DESC LIMIT 1").fetchone()
+        if base is None:
+            return None
+
+        sid = str(uuid.uuid4())
+        now = _now_ms()
+        con.execute(
+            "INSERT INTO spaces (id, user_id, device_id, name, primary_folder_path,"
+            " create_folder_path, pinned, sort_order, status, transport,"
+            " conversation_origin, source_kind, deleted_at, created_at, updated_at)"
+            " VALUES (?,?,?,?,NULL,?,0,NULL,'active','local',NULL,'seed',-1,?,?)",
+            (sid, base["user_id"], base["device_id"],
+             rules.tail_dir(cwd) or cwd, cwd, now, now))
+        return sid
+    except sqlite3.OperationalError:
+        # 没升级的 WorkBuddy 只有 cwd 一套分组，不需要这个
+        return None
+
+
 def load_sessions():
     con = connect()
-    rows = [dict(r) for r in con.execute("""
-        SELECT id, cwd, title, custom_title, status, created_at, updated_at,
-               is_background_automation, is_playground, deleted_at
-        FROM sessions
-        WHERE deleted_at IS NULL
-        ORDER BY updated_at DESC
-    """).fetchall()]
+    try:
+        # 新版本：带空间归属和「最近一次活跃」时间。
+        # 侧栏现在按 space 分组、按 last_activity_at 排「最近」，
+        # 老查法只看 updated_at，和界面上看到的顺序对不上。
+        rows = [dict(r) for r in con.execute("""
+            SELECT s.id, s.cwd, s.title, s.custom_title, s.status,
+                   s.created_at, s.updated_at, s.last_activity_at, s.space_id,
+                   s.is_background_automation, s.is_playground, s.deleted_at,
+                   sp.name AS space_name, sp.pinned AS space_pinned
+            FROM sessions s
+            LEFT JOIN spaces sp ON sp.id = s.space_id AND sp.deleted_at < 0
+            WHERE s.deleted_at IS NULL
+            ORDER BY COALESCE(s.last_activity_at, s.updated_at, s.created_at) DESC
+        """).fetchall()]
+    except sqlite3.OperationalError:
+        # 没升级的 WorkBuddy：没有空间表，退回按目录分组的老查法
+        rows = [dict(r) for r in con.execute("""
+            SELECT id, cwd, title, custom_title, status, created_at, updated_at,
+                   is_background_automation, is_playground, deleted_at
+            FROM sessions
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC
+        """).fetchall()]
     con.close()
 
     out = []
@@ -317,6 +381,13 @@ def load_sessions():
             "cwd": r["cwd"] or "",
             "cwd_norm": rules.norm_path(r["cwd"] or ""),
             "dir": rules.tail_dir(r["cwd"]),
+            # 空间：新版本侧栏的分组单位。空表示这条会话还没归属任何空间
+            "space_id": r.get("space_id") or "",
+            "space": (r.get("space_name") or "").strip(),
+            "space_pinned": bool(r.get("space_pinned")),
+            # 「最近」按这个排：它比 updated_at 更贴近界面上看到的活跃时间
+            "last_active": (r.get("last_activity_at")
+                            or r.get("updated_at") or r.get("created_at") or 0),
             "current": cur or raw,
             "raw": raw[:120],
             "has_custom": bool(cur),
@@ -345,9 +416,15 @@ def load_sessions():
 def stats(items):
     groups = {}
     dup = {}
+    # 有空间数据就按空间算（新库），一条空间都没有才退回按目录算（老库）
+    has_space = any((i.get("space") or "").strip() for i in items)
     for i in items:
-        groups.setdefault(i["cwd_norm"], 0)
-        groups[i["cwd_norm"]] += 1
+        if has_space:
+            key = (i.get("space") or "").strip() or "未归属"
+        else:
+            key = i["cwd_norm"] or "未归属"
+        groups.setdefault(key, 0)
+        groups[key] += 1
         dup.setdefault(i["current"], 0)
         dup[i["current"]] += 1
 
@@ -2033,6 +2110,8 @@ def preview_move(pairs):
             "new_dir": not dst_dir.is_dir(),   # 目标目录还不存在，搬的时候会新建
             # 真实文件夹（不是 WorkBuddy 的存储目录）是否已存在：不存在说明是「新建一个空间」
             "create_real_dir": bool(new_cwd) and not Path(new_cwd).is_dir(),
+            # 目标目录在侧栏里有没有现成的空间。没有的话搬过去会顺手建一个
+            "space_exists": bool(space_for_cwd(con, new_cwd, create=False)),
             "size_h": f"{size/1024/1024:.1f} MB" if size > 1024*1024 else f"{size/1024:.0f} KB",
             "status": status, "why": why,
         })
@@ -2192,7 +2271,15 @@ def move_sessions(pairs):
                     blocked.append({"id": sid, "why": "搬后校验不一致，已跳过数据库改动"})
                     continue
 
-                con.execute("UPDATE sessions SET cwd=? WHERE id=?", (new_cwd, sid))
+                # 空间一起换。新版侧栏按 space_id 分组，只改 cwd 会让会话
+                # 继续挂在旧空间下，而文件已经搬到新目录了。
+                # 老库没有空间表时返回 None，就还是只改 cwd。
+                new_space = space_for_cwd(con, new_cwd)
+                if new_space:
+                    con.execute("UPDATE sessions SET cwd=?, space_id=? WHERE id=?",
+                                (new_cwd, new_space, sid))
+                else:
+                    con.execute("UPDATE sessions SET cwd=? WHERE id=?", (new_cwd, sid))
                 changed += 1
                 moved.append({"id": sid, "from": src.parent.name, "to": dst_dir.name})
     finally:
@@ -2277,7 +2364,21 @@ def restore(name):
                                and (cur["status"] or "") != want_status)
                 if not (title_diff or cwd_diff or status_diff):
                     continue
-                if status_diff:
+                # 目录变了就连空间一起换（新版侧栏按 space_id 分组）。
+                # 目录没变时不动空间——用户可能在 WorkBuddy 里手动挪过空间，
+                # 那属于人家自己的选择，还原标题不该顺手改回去。
+                new_space = space_for_cwd(con, want_cwd) if cwd_diff else None
+                if new_space and status_diff:
+                    con.execute(
+                        "UPDATE sessions SET custom_title=?, cwd=?, status=?,"
+                        " space_id=? WHERE id=?",
+                        (r["custom_title"], want_cwd, want_status, new_space, r["id"]))
+                elif new_space:
+                    con.execute(
+                        "UPDATE sessions SET custom_title=?, cwd=?, space_id=?"
+                        " WHERE id=?",
+                        (r["custom_title"], want_cwd, new_space, r["id"]))
+                elif status_diff:
                     con.execute(
                         "UPDATE sessions SET custom_title=?, cwd=?, status=? WHERE id=?",
                         (r["custom_title"], want_cwd, want_status, r["id"]))
