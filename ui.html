@@ -63,6 +63,179 @@ h1{font-size:clamp(19px,3vw,24px);font-weight:600;letter-spacing:-.02em;line-hei
   .rail-empty{display:none}
 }
 
+/* ===== 产物合集：像手机主屏幕那样，按项目合并成文件夹 =====
+   文件夹是圆角方块，里面摆 4 个缩略当作封面；点开铺满一层浮层，
+   每个产物是一个带图标的小格子。层级放在 50：确认框（60）能盖住它。 */
+.art-top{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:16px 0 18px}
+.art-search{flex:1;min-width:220px;position:relative}
+.art-search input{width:100%;box-sizing:border-box;appearance:none;border:1px solid var(--line);
+  background:var(--card);border-radius:var(--r14);padding:11px 14px 11px 38px;
+  font:inherit;font-size:14px;color:var(--ink);min-height:42px}
+.art-search input:focus{outline:none;border-color:var(--blue);
+  box-shadow:0 0 0 3px rgba(0,113,227,.12)}
+.art-search .ico{position:absolute;left:13px;top:50%;transform:translateY(-50%);
+  color:var(--ink3);pointer-events:none;display:flex}
+
+.art-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(166px,1fr));
+  gap:16px;margin-bottom:8px}
+.art-folder{background:var(--card);border:1px solid transparent;border-radius:var(--r22);
+  padding:13px 13px 12px;cursor:pointer;text-align:left;font:inherit;color:inherit;
+  box-shadow:0 1px 3px rgba(0,0,0,.05);
+  transition:transform .2s cubic-bezier(.22,.61,.36,1),box-shadow .2s,border-color .2s}
+.art-folder:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.09)}
+.art-folder:active{transform:scale(.985)}
+.art-folder:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.art-thumbs{display:grid;grid-template-columns:1fr 1fr;gap:5px;aspect-ratio:1/1;
+  background:var(--bg);border-radius:16px;padding:7px;margin-bottom:11px}
+.art-thumb{background:var(--card);border-radius:9px;display:flex;align-items:center;
+  justify-content:center;overflow:hidden;min-width:0}
+.art-thumb svg{width:19px;height:19px}
+.art-thumb.void{background:transparent;box-shadow:inset 0 0 0 1px var(--line)}
+.art-fname{font-size:13.5px;font-weight:600;letter-spacing:-.01em;line-height:1.32;
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  word-break:break-all}
+.art-fmeta{font-size:12px;color:var(--ink3);margin-top:3px;display:flex;gap:6px;
+  flex-wrap:wrap;align-items:center}
+.art-fmeta .dot{width:3px;height:3px;border-radius:50%;background:var(--ink3);flex:none}
+
+/* 展开后的浮层：像点开 iOS 文件夹那样铺一层 */
+.art-ov{position:fixed;inset:0;z-index:50;display:none;align-items:center;
+  justify-content:center;padding:22px;background:rgba(0,0,0,.26);
+  -webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px)}
+.art-ov.on{display:flex}
+.art-panel{background:var(--card);border-radius:var(--r22);width:100%;max-width:1000px;
+  max-height:86vh;display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 26px 72px rgba(0,0,0,.26);animation:artIn .22s cubic-bezier(.22,.61,.36,1)}
+@keyframes artIn{from{opacity:0;transform:translateY(14px) scale(.985)}
+  to{opacity:1;transform:none}}
+.art-panel-hd{display:flex;align-items:center;gap:12px;padding:16px 20px;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+.art-panel-hd .ttl{font-size:16px;font-weight:600;letter-spacing:-.01em;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.art-panel-hd .sub2{font-size:12.5px;color:var(--ink3);margin-top:1px}
+.art-panel-bd{padding:20px;overflow:auto;flex:1}
+.art-panel-ft{padding:11px 20px;border-top:1px solid var(--line);display:flex;
+  gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2)}
+
+/* 产物格子：图标 + 名字，右下角带状态点 */
+.app-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(94px,1fr));
+  gap:20px 10px}
+.app{position:relative;display:flex;flex-direction:column;align-items:center;gap:7px;
+  padding:4px 2px 2px;border:0;background:transparent;font:inherit;cursor:pointer;
+  border-radius:14px;color:inherit}
+.app:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.app-ic{width:58px;height:58px;border-radius:15px;display:flex;align-items:center;
+  justify-content:center;position:relative;transition:transform .16s cubic-bezier(.22,.61,.36,1);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.04)}
+.app:hover .app-ic{transform:scale(1.07)}
+.app-ic svg{width:27px;height:27px}
+.app-name{font-size:12px;line-height:1.32;text-align:center;color:var(--ink);
+  max-width:92px;word-break:break-all;overflow:hidden;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical}
+.app.gone .app-ic{opacity:.4;box-shadow:inset 0 0 0 1px var(--line)}
+.app.gone .app-name{color:var(--ink3)}
+/* 角标成组摆，两个都出现时并排，不再叠在同一个位置 */
+.app-badges{position:absolute;top:-5px;left:50%;transform:translateX(-50%);
+  display:flex;gap:3px;pointer-events:none;z-index:1}
+.app-badge{height:17px;min-width:17px;padding:0 4px;border-radius:9px;background:var(--ink);
+  color:#fff;font-size:10.5px;line-height:17px;text-align:center;font-weight:600;
+  white-space:nowrap}
+.app-badge.warn{background:var(--warn)}
+.app-badge.bad{background:var(--bad)}
+
+/* 悬停浮出来的小操作条 */
+.app-ops{position:absolute;top:-11px;left:50%;transform:translateX(-50%) translateY(3px);
+  display:flex;gap:3px;background:var(--card);border:1px solid var(--line);
+  border-radius:999px;padding:3px;box-shadow:0 3px 12px rgba(0,0,0,.13);
+  opacity:0;pointer-events:none;transition:opacity .14s,transform .14s;white-space:nowrap}
+.app:hover .app-ops,.app:focus-within .app-ops{opacity:1;pointer-events:auto;
+  transform:translateX(-50%) translateY(0)}
+.app-ops button{appearance:none;border:0;background:transparent;border-radius:999px;
+  width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;color:var(--ink2)}
+.app-ops button:hover{background:var(--bg);color:var(--ink)}
+.app-ops button.del:hover{background:var(--bad-bg);color:var(--bad)}
+.app-ops svg{width:15px;height:15px}
+
+/* 回收站条 */
+.trash-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--card);
+  border-radius:var(--r14);padding:11px 14px;margin:14px 0;font-size:13px;color:var(--ink2);
+  border:1px solid var(--line)}
+.trash-bar .grow{flex:1;min-width:120px}
+
+/* 产物页的空态与说明 */
+.art-hint{font-size:12.5px;color:var(--ink3);line-height:1.6;margin-top:10px}
+
+@media (max-width:640px){
+  .art-grid{grid-template-columns:repeat(auto-fill,minmax(142px,1fr));gap:12px}
+  .art-ov{padding:10px}
+  .art-panel{max-height:92vh;border-radius:18px}
+  /* 手机上放四列，三列会剩一条大白边；操作按钮常驻，手指点得到 */
+  .app-grid{grid-template-columns:repeat(4,1fr);gap:14px 4px}
+  .app-ic{width:50px;height:50px;border-radius:14px}
+  .app-name{max-width:74px;font-size:11px}
+  /* 手机上不放一整排按钮：会撑宽格子，四列直接放不下。
+     点图标就是打开，删放在右上角一个小圆点；「在文件夹定位」手机用不到，隐掉。 */
+  .app-ops{opacity:1;pointer-events:auto;position:absolute;top:-5px;right:-2px;
+    transform:none;background:transparent;border:0;box-shadow:none;padding:0;gap:0}
+  .app-ops button[data-act="open"],
+  .app-ops button[data-act="reveal"]{display:none}
+  .app-ops button{width:23px;height:23px;background:var(--card);border-radius:50%;
+    box-shadow:0 1px 4px rgba(0,0,0,.16);color:var(--ink3)}
+  .app-ops button.del:hover{background:var(--bad-bg);color:var(--bad)}
+  .app-ops svg{width:12px;height:12px}
+  .hide-m{display:none}
+  .art-panel-hd{padding:13px 15px;gap:8px}
+  .art-panel-hd .ttl{font-size:15px}
+  .art-panel-bd{padding:15px}
+  .art-chips .chip{min-height:32px;padding:3px 9px;font-size:12.5px}
+}
+
+/* 搜索结果用列表：几百条结果铺成网格反而更难找，列表一屏能扫更多 */
+.art-list{background:var(--card);border-radius:var(--r14);border:1px solid var(--line);
+  overflow:hidden}
+.art-row{display:flex;align-items:center;gap:11px;padding:9px 14px;
+  border-bottom:1px solid var(--line);cursor:pointer;min-height:52px}
+.art-row:last-child{border-bottom:0}
+.art-row:hover{background:var(--bg)}
+.art-row .ic{width:34px;height:34px;border-radius:9px;flex:none;display:flex;
+  align-items:center;justify-content:center}
+.art-row .ic svg{width:17px;height:17px}
+.art-row .nm{flex:1;min-width:0}
+.art-row .nm .l1{display:flex;align-items:center;gap:6px;min-width:0}
+.art-row .nm .l1 b{font-weight:500;font-size:13.5px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.art-row .nm .l2{font-size:11.5px;color:var(--ink3);display:block;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+.art-row .sz{font-size:12px;color:var(--ink3);flex:none;text-align:right;
+  font-variant-numeric:tabular-nums}
+.art-row .ops{display:flex;gap:2px;flex:none}
+.art-row .ops button{appearance:none;border:0;background:transparent;border-radius:8px;
+  width:30px;height:30px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;color:var(--ink3)}
+.art-row .ops button:hover{background:var(--line);color:var(--ink)}
+.art-row .ops button.del:hover{background:var(--bad-bg);color:var(--bad)}
+.art-row .ops svg{width:15px;height:15px}
+.art-row.gone .ic{opacity:.42}
+.art-row.gone .nm b{color:var(--ink3)}
+.art-tag{font-size:11px;padding:1px 6px;border-radius:6px;flex:none;
+  background:var(--warn-bg);color:var(--warn);margin-left:6px}
+.art-tag.ver{background:var(--blue-bg);color:var(--blue)}
+
+/* 文件夹里的类型筛选：一个项目动辄上千个产物，先按类型收窄再看 */
+.art-chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.art-chips .chip{min-height:34px;padding:4px 11px;font-size:13px}
+
+/* 整个项目的文件都不在了：把封面压暗，免得点进去才发现是空的 */
+.art-folder.all-gone .art-thumbs{background:var(--bg);opacity:.5}
+.art-folder.all-gone .art-fname{color:var(--ink3)}
+
+@media (max-width:640px){
+  .art-row{padding:8px 11px;gap:9px;min-height:48px}
+  .art-row .sz{display:none}
+  .art-row .nm .l2{white-space:normal}
+}
+
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .chip{appearance:none;font:inherit;font-size:14px;padding:8px 14px;min-height:44px;
   border:1px solid var(--line);background:var(--card);color:var(--ink2);
@@ -340,6 +513,7 @@ tbody tr{animation:rowfade .15s ease-out}
 <nav class="tabs" id="tabs" aria-label="视图">
   <button class="tab on" data-view="home">主页</button>
   <button class="tab" data-view="sessions">会话整理</button>
+  <button class="tab" data-view="artifacts">产物</button>
   <button class="tab" data-view="maint">维护 · 备份</button>
 </nav>
 
@@ -455,6 +629,42 @@ tbody tr{animation:rowfade .15s ease-out}
 </main>
 
 <!-- ===== 维护 · 备份 ===== -->
+<!-- ===== 产物合集 ===== -->
+<main id="viewArtifacts" class="view">
+  <div class="stats" id="artStats"></div>
+
+  <div class="art-top">
+    <label class="art-search">
+      <span class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>
+        <path d="M20 20l-3.6-3.6"/></svg></span>
+      <input id="artQ" type="search" autocomplete="off"
+        placeholder="搜产物名、项目名或扩展名，比如 早报 / html / 工作台">
+    </label>
+    <button class="btn ghost" id="artRefresh">重新扫描</button>
+    <button class="btn ghost" id="artTrashBtn">回收站 <span id="artTrashN">0</span></button>
+  </div>
+
+  <div id="artBody"></div>
+  <div class="art-hint" id="artHint"></div>
+</main>
+
+<!-- 点开文件夹：铺一层浮层，产物像主屏幕图标那样排开 -->
+<div class="art-ov" id="artOv" role="dialog" aria-modal="true" aria-labelledby="artOvTtl">
+  <div class="art-panel">
+    <div class="art-panel-hd">
+      <div style="flex:1;min-width:0">
+        <div class="ttl" id="artOvTtl"></div>
+        <div class="sub2" id="artOvSub"></div>
+      </div>
+      <button class="btn ghost" id="artOvAll">清理旧版本</button>
+      <button class="btn ghost" id="artOvClose">关闭</button>
+    </div>
+    <div class="art-panel-bd" id="artOvBody"></div>
+    <div class="art-panel-ft" id="artOvFoot"></div>
+  </div>
+</div>
+
 <main id="viewMaint" class="view">
   <div class="card" style="border-radius:var(--r14);padding:22px 24px 20px">
       <h2 style="font-size:17px;font-weight:600;margin-bottom:6px">路径写法分裂</h2>
@@ -1860,8 +2070,427 @@ async function enterMaint(){
   await Promise.all([loadPaths(), loadStorage(), loadHistory()]);
 }
 
+/* ================= 产物合集 =================
+   数据来自 /api/artifacts：每个项目一个文件夹，里面是产物条目。
+   三个状态位决定界面怎么画：
+     exists=false   文件已不在原位置 → 灰掉、不能打开
+     protected=true 被引用/入口文件/最新版 → 删除要多问一次
+     version_total  同名多版本 → 标 v1 v2，最新版受保护  */
+
+const ART_ICO = {
+  image:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.5" cy="10" r="1.6"/><path d="M4 17.5l4.6-4.6L13 17.4l2.9-2.9L20 18"/></svg>',
+  code:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 7.5L5 12l4.5 4.5"/><path d="M14.5 7.5L19 12l-4.5 4.5"/></svg>',
+  doc:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3.5H7A1.8 1.8 0 0 0 5.2 5.3v13.4A1.8 1.8 0 0 0 7 20.5h10a1.8 1.8 0 0 0 1.8-1.8V8.8z"/><path d="M13.5 3.5v5.3h5.3"/><path d="M8.8 13h6.4M8.8 16.6h4.2"/></svg>',
+  sheet:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.2"/><path d="M3.5 9.6h17M9.6 9.6v9.4M15.2 9.6v9.4"/></svg>',
+  slide:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M12 16.5v3M8.8 19.5h6.4"/></svg>',
+  video:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3" y="5.5" width="13" height="13" rx="2.2"/><path d="M16 10.6l4.2-2.6v8l-4.2-2.6z"/></svg>',
+  audio:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17.2V6.6l9-1.8v10.4"/><circle cx="6.6" cy="17.6" r="2.4"/><circle cx="15.6" cy="16" r="2.4"/></svg>',
+  archive:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="4.4" rx="1.4"/><path d="M5.2 8.9v9.2a1.6 1.6 0 0 0 1.6 1.6h10.4a1.6 1.6 0 0 0 1.6-1.6V8.9"/><path d="M10.4 12.4h3.2"/></svg>',
+  file:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3.5H7A1.8 1.8 0 0 0 5.2 5.3v13.4A1.8 1.8 0 0 0 7 20.5h10a1.8 1.8 0 0 0 1.8-1.8V8.8z"/><path d="M13.5 3.5v5.3h5.3"/></svg>',
+};
+const ART_TONE = {
+  image:['#e8f0fe','#1a73e8'], code:['#eef0f3','#37474f'],
+  doc:['#fdf4e3','#9a6700'],   sheet:['#e6f4ea','#137333'],
+  slide:['#fce9e7','#b3261e'], video:['#fce9e7','#b3261e'],
+  audio:['#e4f1f4','#0b6e7f'], archive:['#eef0f3','#5f6368'],
+  file:['#eef0f3','#5f6368'],
+};
+const ART_OPS = {
+  open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4.5h5.5V10"/><path d="M19.5 4.5L11 13"/><path d="M18 14.5v4a1.8 1.8 0 0 1-1.8 1.8H5.8A1.8 1.8 0 0 1 4 18.5V8.1A1.8 1.8 0 0 1 5.8 6.3h4"/></svg>',
+  reveal:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3.5 7.2A1.7 1.7 0 0 1 5.2 5.5h4l1.7 2.2h8.1a1.7 1.7 0 0 1 1.7 1.7v8.6a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z"/></svg>',
+  del:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 7h15"/><path d="M9.5 7V5.3A1.3 1.3 0 0 1 10.8 4h2.4a1.3 1.3 0 0 1 1.3 1.3V7"/><path d="M6.6 7l.8 11.4a1.8 1.8 0 0 0 1.8 1.6h5.6a1.8 1.8 0 0 0 1.8-1.6L17.4 7"/></svg>',
+};
+const artIcon = k => ART_ICO[k] || ART_ICO.file;
+const artTone = k => ART_TONE[k] || ART_TONE.file;
+
+const ART_EXT_KIND = {
+  png:'image',jpg:'image',jpeg:'image',gif:'image',webp:'image',svg:'image',bmp:'image',ico:'image',avif:'image',
+  mp4:'video',mov:'video',webm:'video',mkv:'video',avi:'video',
+  mp3:'audio',wav:'audio',m4a:'audio',flac:'audio',ogg:'audio',
+  html:'code',htm:'code',js:'code',mjs:'code',cjs:'code',ts:'code',tsx:'code',jsx:'code',
+  vue:'code',py:'code',json:'code',css:'code',bat:'code',cmd:'code',ps1:'code',sh:'code',
+  sql:'code',yml:'code',yaml:'code',toml:'code',ini:'code',java:'code',go:'code',rs:'code',
+  md:'doc',txt:'doc',pdf:'doc',docx:'doc',doc:'doc',rtf:'doc',
+  xlsx:'sheet',xls:'sheet',csv:'sheet',tsv:'sheet',
+  pptx:'slide',ppt:'slide',
+  zip:'archive','7z':'archive',rar:'archive',tar:'archive',gz:'archive',
+};
+
+let ART = null;            // 全量数据
+let ART_Q = '';            // 搜索词
+let ART_MODE = 'project';  // project | trash
+let ART_CUR = null;        // 当前打开的项目
+
+function artSize(n){
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+const artKindOf = ext => ART_EXT_KIND[String(ext || '').replace('.', '').toLowerCase()] || 'file';
+
+async function enterArtifacts(){
+  showView('artifacts');
+  if (ART) return;
+  await loadArtifacts(false);
+}
+
+async function loadArtifacts(force){
+  const body = $('artBody');
+  body.innerHTML = '<div class="empty">正在读产物索引，两千多个文件要逐个确认还在不在，稍等几秒…</div>';
+  $('artHint').textContent = '';
+  try {
+    ART = await api('/api/artifacts' + (force ? '?force=1' : ''));
+  } catch (e) {
+    body.innerHTML = `<div class="empty">读产物索引失败：${esc(e.message)}</div>`;
+    return;
+  }
+  renderArtStats();
+  renderArtHome();
+  $('artTrashN').textContent = (ART.trash || []).length || '';
+}
+
+function renderArtStats(){
+  const s = ART.stats;
+  const cards = [
+    ['产物总数', s.total, s.projects + ' 个项目'],
+    ['可以打开', s.exists, s.missing ? (s.missing + ' 个文件已丢失') : '全部在位'],
+    ['占用空间', artSize(s.size), '只算还在的'],
+    ['已保护', s.protected, '删了会影响别人'],
+    ['产出批次', s.bundles, '同一次任务的归一堆'],
+  ];
+  $('artStats').innerHTML = cards.map(([k, v, d]) =>
+    `<div class="stat"><div class="k">${esc(k)}</div>
+     <div class="v">${esc(v)}</div><div class="d">${esc(d)}</div></div>`).join('');
+}
+
+function artAppHtml(a){
+  const [bg, fg] = artTone(a.kind);
+  const gone = !a.exists;
+  const tips = [a.path];
+  if (gone) tips.push('文件已不在原位置');
+  if (a.protected) tips.push(a.protect_reason);
+  const icStyle = `background:${bg};color:${fg}${gone ? ';cursor:default' : ''}`;
+  return `<div class="app${gone ? ' gone' : ''}" data-id="${a.id}" title="${esc(tips.join('\n'))}">
+    ${(a.protected || a.version_total > 1) ? `<span class="app-badges">
+      ${a.protected ? '<span class="app-badge warn">保</span>' : ''}
+      ${a.version_total > 1 ? `<span class="app-badge">v${a.version_index}</span>` : ''}
+    </span>` : ''}
+    <button class="app-ic" style="${icStyle}" data-act="open"${gone ? ' disabled' : ''}>
+      ${artIcon(a.kind)}</button>
+    <span class="app-name">${esc(a.name)}</span>
+    <span class="app-ops">
+      ${gone ? '' : `<button data-act="open" title="打开">${ART_OPS.open}</button>`}
+      <button data-act="reveal" title="在文件夹里定位">${ART_OPS.reveal}</button>
+      ${gone ? '' : `<button class="del" data-act="del" title="移到回收站">${ART_OPS.del}</button>`}
+    </span>
+  </div>`;
+}
+
+function artRowHtml(a){
+  const [bg, fg] = artTone(a.kind);
+  const gone = !a.exists;
+  const cut = a.path.lastIndexOf('\\');
+  const parent = cut > 0 ? a.path.slice(0, cut) : a.path;
+  const tail = parent.slice(parent.lastIndexOf('\\') + 1);
+  const tags = (a.protected ? '<span class="art-tag">保</span>' : '') +
+    (a.version_total > 1 ? `<span class="art-tag ver">v${a.version_index}</span>` : '');
+  return `<div class="art-row${gone ? ' gone' : ''}" data-id="${a.id}" title="${esc(a.path)}">
+    <span class="ic" style="background:${bg};color:${fg}">${artIcon(a.kind)}</span>
+    <span class="nm">
+      <span class="l1"><b>${esc(a.name)}</b>${tags}</span>
+      <span class="l2">${esc(a.project)} · ${esc(tail)}</span>
+    </span>
+    <span class="sz">${gone ? '已丢失' : artSize(a.size)}</span>
+    <span class="ops">
+      ${gone ? '' : `<button data-act="open" title="打开">${ART_OPS.open}</button>`}
+      <button data-act="reveal" title="在文件夹里定位">${ART_OPS.reveal}</button>
+      ${gone ? '' : `<button class="del" data-act="del" title="移到回收站">${ART_OPS.del}</button>`}
+    </span>
+  </div>`;
+}
+
+function renderArtHome(){
+  const body = $('artBody');
+  const hint = $('artHint');
+  const q = ART_Q.trim().toLowerCase();
+
+  // 搜索：结果用列表。几百条结果铺成图标网格是另一堵墙，列表才扫得动
+  if (q){
+    const hits = (ART.items || []).filter(a =>
+      a.name.toLowerCase().includes(q) ||
+      (a.project || '').toLowerCase().includes(q) ||
+      (a.ext || '').toLowerCase().includes(q) ||
+      a.path.toLowerCase().includes(q));
+    hint.textContent = ART.index_dir ? '产物索引：' + ART.index_dir : '';
+    if (!hits.length){
+      body.innerHTML = `<div class="empty">没有匹配「${esc(q)}」的产物<br>
+        <span style="font-size:13px">试试项目名、扩展名，或者文件路径里的一段</span></div>`;
+      return;
+    }
+    hits.sort((a, b) => (b.exists - a.exists) || (b.mtime - a.mtime));
+    const CAP = 120;
+    body.innerHTML = `<div class="art-hint" style="margin:0 0 10px">
+      找到 ${hits.length} 个 · 点一行直接打开</div>
+      <div class="art-list">${hits.slice(0, CAP).map(artRowHtml).join('')}</div>
+      ${hits.length > CAP ? `<div class="art-hint">只列了前 ${CAP} 个，再多输几个字缩小范围</div>` : ''}`;
+    return;
+  }
+
+  if (!ART.has_index){
+    body.innerHTML = `<div class="empty">这台机器上还没找到 WorkBuddy 的产物索引<br>
+      <span style="font-size:13px">看过 ${esc(ART.index_dir)} 这个位置，没有东西</span></div>`;
+    return;
+  }
+
+  const folders = (ART.projects || []).map(p => {
+    const th = (p.preview || []).slice(0, 4);
+    while (th.length < 4) th.push(null);
+    return `<button class="art-folder${p.exists ? '' : ' all-gone'}" data-pk="${esc(p.key)}"
+      title="${esc(p.path || p.name)}">
+      <div class="art-thumbs">
+        ${th.map(t => t
+          ? `<span class="art-thumb" style="color:${artTone(t.kind)[1]}">${artIcon(t.kind)}</span>`
+          : `<span class="art-thumb void"></span>`).join('')}
+      </div>
+      <div class="art-fname">${esc(p.name)}</div>
+      <div class="art-fmeta">
+        <span>${p.count} 个</span>
+        ${p.exists === 0
+          ? '<span class="dot"></span><span>全部丢失</span>'
+          : (p.missing ? `<span class="dot"></span><span>${p.missing} 丢失</span>` : '')}
+        ${p.exists ? '<span class="dot"></span><span>' + artSize(p.size) + '</span>' : ''}
+      </div>
+    </button>`;
+  }).join('');
+
+  body.innerHTML = `<div class="art-grid">${folders}</div>`;
+  hint.textContent = `索引位置：${ART.index_dir}　·　按项目合并，点开看里面的产物`;
+}
+
+function artBindings(){
+  // 文件夹 / 结果格子的点击统一走委托，避免每次重绘都重新绑一遍
+  $('artBody').addEventListener('click', e => {
+    const folder = e.target.closest('.art-folder');
+    if (folder){ openArtFolder(folder.dataset.pk); return; }
+    const btn = e.target.closest('[data-act]');
+    const row = e.target.closest('.art-row, .app');
+    if (btn && row){ doArtAct(btn.dataset.act, row.dataset.id); return; }
+    if (row && !row.classList.contains('gone')) doArtAct('open', row.dataset.id);
+  });
+
+  $('artOvBody').addEventListener('click', e => {
+    const chip = e.target.closest('[data-fk]');
+    if (chip && ART_CUR){ ART_F = chip.dataset.fk; openArtFolder(ART_CUR.key, true); return; }
+    const btn = e.target.closest('[data-act]');
+    const app = e.target.closest('.app');
+    if (btn && app){ doArtAct(btn.dataset.act, app.dataset.id); return; }
+    const tbtn = e.target.closest('[data-tact]');
+    const tapp = e.target.closest('.app');
+    if (tbtn && tapp) doTrashAct(tbtn.dataset.tact, tapp.dataset.tid);
+  });
+
+  $('artOvFoot').addEventListener('click', async e => {
+    if (e.target.id === 'artTrashClear'){
+      const ok = await ask('把回收站里的文件全部彻底删掉？\n\n这一步删了就找不回来了。想留哪个先还原。', '全部删掉');
+      if (!ok) return;
+      const r = await api('/api/artifacts/purge', {});
+      toast(`清掉 ${r.purged} 个，释放 ${artSize(r.freed)}`);
+      openTrash();
+    }
+  });
+
+  let qt = 0;
+  $('artQ').addEventListener('input', e => {
+    clearTimeout(qt);
+    const v = e.target.value;
+    qt = setTimeout(() => { ART_Q = v; renderArtHome(); }, 140);
+  });
+
+  $('artOvClose').onclick = closeArtOv;
+  $('artOv').addEventListener('click', e => { if (e.target.id === 'artOv') closeArtOv(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && $('artOv').classList.contains('on')) closeArtOv();
+  });
+
+  $('artRefresh').onclick = () => loadArtifacts(true);
+  $('artTrashBtn').onclick = openTrash;
+
+  // 清理当前文件夹里的旧版本：这些都不受保护，批量移回收站是安全的
+  $('artOvAll').onclick = async () => {
+    if (ART_MODE !== 'project' || !ART_CUR) return;
+    const olds = (ART.items || []).filter(a =>
+      a.project_key === ART_CUR.key && a.version_total > 1 &&
+      a.version_index < a.version_total && a.exists);
+    if (!olds.length){ toast('这个项目里没有可清理的旧版本'); return; }
+    const ok = await ask(
+      `把「${ART_CUR.name}」里 ${olds.length} 个旧版本移到回收站？\n\n` +
+      `同名文件的最新一代都留着，只清历史备份。删错可以在回收站还原。`, '清掉旧版本');
+    if (!ok) return;
+    const r = await api('/api/artifacts/trash', {ids: olds.map(o => o.id), force: true});
+    toast(`已移走 ${(r.moved || []).length} 个旧版本`);
+    await loadArtifacts(true);
+    openArtFolder(ART_CUR.key);
+  };
+}
+
+function closeArtOv(){
+  $('artOv').classList.remove('on');
+  ART_CUR = null;
+}
+
+const ART_KIND_CN = {image:'图片', code:'代码', doc:'文档', sheet:'表格', slide:'幻灯片',
+  video:'视频', audio:'音频', archive:'压缩包', file:'其它'};
+let ART_F = '';            // 文件夹内按类型收窄
+
+function openArtFolder(pk, keepFilter){
+  const p = (ART.projects || []).find(x => x.key === pk);
+  if (!p) return;
+  ART_MODE = 'project';
+  ART_CUR = p;
+  $('artOvAll').hidden = false;
+  if (!keepFilter) ART_F = '';
+  const all = (ART.items || []).filter(a => a.project_key === pk);
+  const kinds = {};
+  all.forEach(a => { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
+  const items = all
+    .filter(a => !ART_F || a.kind === ART_F)
+    .sort((a, b) => (b.exists - a.exists) || (b.mtime - a.mtime));
+  const lost = all.filter(a => !a.exists).length;
+
+  $('artOvTtl').textContent = p.name;
+  $('artOvSub').innerHTML =
+    `${p.count} 个产物<span class="hide-m"> · ${p.sessions} 次会话产出</span>` +
+    ` · ${artSize(p.size)}` + (lost ? ` · ${lost} 个已丢失` : '');
+
+  const chips = [['', '全部', all.length]]
+    .concat(Object.entries(kinds).sort((a, b) => b[1] - a[1])
+      .map(([k, cnt]) => [k, ART_KIND_CN[k] || k, cnt]));
+  const chipHtml = chips.map(([k, label, cnt]) =>
+    `<button class="chip" aria-pressed="${k === ART_F}" data-fk="${esc(k)}">${esc(label)} ${cnt}</button>`
+  ).join('');
+
+  $('artOvBody').innerHTML = all.length
+    ? `<div class="art-chips">${chipHtml}</div>
+       <div class="app-grid">${items.map(artAppHtml).join('')}</div>`
+    : '<div class="empty">这个项目下没有产物</div>';
+  $('artOvFoot').innerHTML =
+    '<span style="flex:1">带「保」标记的删之前会多问一次——删了会让引用它的产物打不开或破图。</span>';
+  $('artOv').classList.add('on');
+}
+
+async function openTrash(){
+  ART_MODE = 'trash';
+  ART_CUR = null;
+  let r;
+  try { r = await api('/api/artifacts/trash'); }
+  catch (e){ toast('读回收站失败：' + e.message); return; }
+  const list = r.trash || [];
+  $('artOvAll').hidden = true;
+  $('artOvTtl').textContent = '产物回收站';
+  $('artOvSub').textContent = list.length
+    ? `${list.length} 个 · 都在 ${r.dir}`
+    : '空的';
+  if (!list.length){
+    $('artOvBody').innerHTML =
+      '<div class="empty">回收站是空的<br><span style="font-size:13px">删产物会先移到这里，不会直接消失</span></div>';
+  } else {
+    $('artOvBody').innerHTML = `<div class="app-grid">${list.map(t => {
+      const k = artKindOf(t.name.includes('.') ? t.name.split('.').pop() : '');
+      const [bg, fg] = artTone(k);
+      return `<div class="app" data-tid="${esc(t.id)}" title="${esc(t.orig)}">
+        <span class="app-ic" style="background:${bg};color:${fg}${t.still_there ? '' : ';opacity:.4'}">
+          ${artIcon(k)}</span>
+        <span class="app-name">${esc(t.name)}</span>
+        <span class="app-ops">
+          <button data-tact="restore" title="还原回原位置">${ART_OPS.open}</button>
+          <button class="del" data-tact="purge" title="彻底删除">${ART_OPS.del}</button>
+        </span>
+      </div>`;
+    }).join('')}</div>`;
+  }
+  $('artOvFoot').innerHTML =
+    `<span style="flex:1">「还原」放回原来的位置；「彻底删」之后找不回来。</span>
+     ${list.length ? '<button class="btn ghost" id="artTrashClear">清空回收站</button>' : ''}`;
+  $('artOv').classList.add('on');
+}
+
+async function doArtAct(act, id){
+  const a = (ART.items || []).find(x => x.id === id);
+  if (!a) return;
+
+  if (act === 'open'){
+    if (!a.exists){ toast('这个文件已经不在原位置了，打不开', 4200); return; }
+    try {
+      const r = await api('/api/artifacts/open', {ids: [id]});
+      if (r.skipped && r.skipped.length) toast(r.skipped[0].why || '打不开', 4200);
+    } catch (e){ toast('打开失败：' + e.message, 4200); }
+    return;
+  }
+
+  if (act === 'reveal'){
+    try {
+      const r = await api('/api/artifacts/reveal', {id});
+      if (r.error) toast(r.error, 4200);
+    } catch (e){ toast('定位失败：' + e.message, 4200); }
+    return;
+  }
+
+  if (act === 'del'){
+    let ok;
+    if (a.protected){
+      ok = await ask(
+        `「${a.name}」${a.protect_reason}。\n\n` +
+        `确定还要移走吗？移走后那些地方会打不开或破图。`, '仍然移走');
+    } else {
+      ok = await ask(`把「${a.name}」移到回收站？\n\n不会真删，之后能还原。`, '移到回收站');
+    }
+    if (!ok) return;
+    try {
+      const r = await api('/api/artifacts/trash', {ids: [id], force: !!a.protected});
+      if ((r.blocked || []).length){
+        toast('被拦下了：' + r.blocked[0].why, 5000);
+        return;
+      }
+      if ((r.skipped || []).length){
+        toast(r.skipped[0].why, 4800);
+        return;
+      }
+      toast('已移到回收站，可在「回收站」里还原');
+      const pk = ART_CUR ? ART_CUR.key : null;
+      await loadArtifacts(true);
+      if (pk && ART_MODE === 'project') openArtFolder(pk);
+      else if (ART_MODE === 'trash') openTrash();
+    } catch (e){ toast('删除失败：' + e.message, 4200); }
+  }
+}
+
+async function doTrashAct(act, id){
+  try {
+    if (act === 'restore'){
+      const r = await api('/api/artifacts/restore', {ids: [id]});
+      if ((r.skipped || []).length){ toast(r.skipped[0].why, 4400); return; }
+      toast('已还原' + (r.restored && r.restored[0] ? '：' + r.restored[0].name : ''));
+    } else if (act === 'purge'){
+      const ok = await ask('这一个彻底删掉？删了就找不回来了。', '彻底删除');
+      if (!ok) return;
+      const r = await api('/api/artifacts/purge', {ids: [id]});
+      toast(`已彻底删除，释放 ${artSize(r.freed)}`);
+    }
+    await loadArtifacts(true);
+    openTrash();
+  } catch (e){ toast('操作失败：' + e.message, 4200); }
+}
+
+artBindings();
+
 document.querySelectorAll('#tabs .tab').forEach(t=>{
-  t.onclick = ()=> (t.dataset.view === 'maint' ? enterMaint() : showView(t.dataset.view));
+  t.onclick = ()=>{
+    if (t.dataset.view === 'maint') return enterMaint();
+    if (t.dataset.view === 'artifacts') return enterArtifacts();
+    showView(t.dataset.view);
+  };
 });
 
 /* ---------- 主页 ---------- */

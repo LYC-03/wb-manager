@@ -4,6 +4,7 @@ rules_local.py
 backups/
 naming/
 history/
+artifact-trash/
 history.jsonl
 incident-backup/
 shots/
@@ -43,6 +44,7 @@ demo-workspace/
 # 自用验收脚本（含本机路径，不入库）
 cdp_ux.mjs
 shot_v2.mjs
+shot_art.mjs
 
 # PyInstaller 打包产物（自己构建，不入库）
 build/

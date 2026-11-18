@@ -28,7 +28,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 def _app_dir() -> Path:
     """数据目录：配置、备份、历史都放这里，跟着 exe（或脚本）走。"""
@@ -1533,6 +1533,572 @@ def _ms_to_str(ms):
         return "—"
 
 
+# ============================================================================
+# 产物合集
+#
+# WorkBuddy 给每个会话记一份产物清单：<配置目录>/artifact-index/<会话ID>.json，
+# 每条含 uri（file:/// 开头的真实路径）、大小、类型、是哪个工具产出的。
+# 索引只记路径、不存副本，所以文件被清理后索引还在——必须逐条查存在性，
+# 否则界面上会把一堆早已不存在的文件当成「我的产物」列出来。
+#
+# 项目归属靠会话反查：产物 -> 会话 -> cwd -> 项目。cwd 有正反斜杠两种写法，
+# 必须先规范化再聚合，否则同一个项目会裂成两个文件夹。
+# ============================================================================
+
+_ART_TTL = 10.0
+_ART_CACHE = {"t": 0.0, "data": None}
+_ART_MAX_READ = 2 * 1024 * 1024      # 单个文本产物最大读取字节，防大文件拖慢扫描
+
+_ART_KINDS = [
+    ("image",   {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".avif"}),
+    ("video",   {".mp4", ".mov", ".webm", ".mkv", ".avi"}),
+    ("audio",   {".mp3", ".wav", ".m4a", ".flac", ".ogg"}),
+    ("code",    {".html", ".htm", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue",
+                 ".py", ".json", ".css", ".bat", ".cmd", ".ps1", ".sh", ".sql",
+                 ".yml", ".yaml", ".toml", ".ini", ".java", ".go", ".rs", ".c", ".cpp", ".h"}),
+    ("doc",     {".md", ".txt", ".pdf", ".docx", ".doc", ".rtf"}),
+    ("sheet",   {".xlsx", ".xls", ".csv", ".tsv"}),
+    ("slide",   {".pptx", ".ppt"}),
+    ("archive", {".zip", ".7z", ".rar", ".tar", ".gz"}),
+]
+_ART_TEXT_EXT = {".html", ".htm", ".css", ".js", ".mjs", ".json", ".vue", ".md", ".svg"}
+_ART_ENTRY_NAMES = {"index.html", "index.htm", "main.py", "app.py", "server.py",
+                    "start.cmd", "启动.bat", "README.md", "readme.md"}
+
+_REF_RE = re.compile(r"""(?:src|href|data-src)\s*=\s*["']([^"'>]+)""", re.I)
+_CSS_RE = re.compile(r"""url\(\s*["']?([^"')]+)""", re.I)
+
+
+def _art_index_dir() -> Path:
+    """产物索引目录，永远跟着当前这个库走（--db 换库时自动跟着换）。"""
+    return Path(REAL_DB).parent / "artifact-index"
+
+
+def _art_trash_dir() -> Path:
+    """产物回收站，按库分目录。每次现算，避免 main() 换库后指向旧目录。"""
+    key = hashlib.sha1(str(REAL_DB).lower().encode("utf-8")).hexdigest()[:8]
+    return HERE / "artifact-trash" / key
+
+
+def _art_trash_manifest() -> Path:
+    return _art_trash_dir() / "manifest.jsonl"
+
+
+def _uri_to_path(uri: str):
+    """file:///F:/... 转成 Path。注意 file:/// 是 8 个字符，多截一位会多出斜杠。"""
+    if not uri:
+        return None
+    try:
+        u = urlparse(uri)
+    except ValueError:
+        return None
+    p = unquote(u.path or "")
+    if not p:
+        return None
+    if p.startswith("/") and len(p) > 2 and p[2] == ":":
+        p = p[1:]
+    return Path(p.replace("/", "\\")) if IS_WIN else Path(p)
+
+
+def _art_kind(ext: str) -> str:
+    ext = (ext or "").lower()
+    for kind, exts in _ART_KINDS:
+        if ext in exts:
+            return kind
+    return "file"
+
+
+def _art_id(path) -> str:
+    """产物 ID：按路径取稳定哈希，同一文件多次出现算同一个。"""
+    return hashlib.sha1(str(path).lower().encode("utf-8")).hexdigest()[:12]
+
+
+def _art_refs_of(path: Path, base: Path):
+    """从一个文本产物里找出它引用的本地文件，返规范化后的候选路径集合。
+
+    只解析「同目录/子目录」的相对引用——产物散落在整个磁盘上，
+    跟着 ../.. 一路外扩会把无关文件误判成依赖。
+    """
+    out = set()
+    try:
+        if path.stat().st_size > _ART_MAX_READ:
+            return out
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return out
+    for raw in list(_REF_RE.findall(text)) + list(_CSS_RE.findall(text)):
+        ref = (raw or "").strip()
+        if not ref or ref.startswith(("http://", "https://", "#", "data:",
+                                      "javascript:", "mailto:", "file://", "//")):
+            continue
+        ref = ref.split("?")[0].split("#")[0]
+        if not ref:
+            continue
+        try:
+            target = (path.parent / ref).resolve()
+        except (OSError, ValueError):
+            continue
+        try:
+            target.relative_to(base)      # 只认同目录/子目录内
+        except ValueError:
+            continue
+        if target.is_file():
+            out.add(str(target))
+    return out
+
+
+def scan_artifacts(force: bool = False):
+    """扫产物索引，按项目合并成文件夹，并算出依赖关系。
+
+    返回里每个产物带三样关键信息：
+      exists         文件还在不在（不在的不能打开、也没必要删）
+      ref_by         谁引用了我（非空 = 删了会让别人的页面破掉）
+      version_index  同名文件里的第几版（1 = 最新）
+    """
+    now = time.time()
+    if not force and _ART_CACHE["data"] and now - _ART_CACHE["t"] < _ART_TTL:
+        return _ART_CACHE["data"]
+
+    idx_dir = _art_index_dir()
+    if not idx_dir.is_dir():
+        data = {"has_index": False, "index_dir": str(idx_dir), "projects": [],
+                "items": [], "stats": {"total": 0, "exists": 0, "missing": 0,
+                                       "size": 0, "projects": 0, "protected": 0,
+                                       "bundles": 0}, "trash": art_trash_list()}
+        _ART_CACHE.update(t=now, data=data)
+        return data
+
+    # ---- 1. 读索引，摊平成产物列表 ----
+    raw_items = []
+    bad_idx = 0
+    for f in idx_dir.glob("*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            bad_idx += 1
+            continue
+        sid = f.stem
+        for a in d.get("artifacts") or []:
+            if not isinstance(a, dict):
+                continue
+            p = _uri_to_path(a.get("uri") or "")
+            if not p:
+                continue
+            raw_items.append({
+                "path": p,
+                "name": a.get("name") or a.get("title") or p.name,
+                "mime": a.get("mimeType") or "",
+                "ctype": a.get("contentType") or "",
+                "size_idx": int(a.get("size") or 0),
+                "created": int(a.get("createdAt") or 0),
+                "updated": int(a.get("updatedAt") or 0),
+                "tool": ((a.get("_meta") or {}).get("sourceTool") or ""),
+                "sid": sid,
+            })
+
+    # ---- 2. 会话 -> 项目（cwd 规范化） ----
+    sess = {}
+    try:
+        con = connect()
+        for r in con.execute("SELECT id, cwd, title, custom_title FROM sessions"):
+            sess[r["id"]] = dict(r)
+        con.close()
+    except sqlite3.Error:
+        pass
+
+    # ---- 3. 逐条查存在性，组装 ----
+    items = []
+    seen = {}
+    for it in raw_items:
+        p: Path = it["path"]
+        try:
+            st = p.stat()
+            exists, size, mtime = True, st.st_size, int(st.st_mtime * 1000)
+        except (OSError, ValueError):
+            exists, size, mtime = False, it["size_idx"], it["updated"]
+
+        s = sess.get(it["sid"]) or {}
+        cwd_raw = (s.get("cwd") or "").strip()
+        proj_key = rules.norm_path(cwd_raw) if cwd_raw else ""
+        proj_name = rules.tail_dir(cwd_raw) if cwd_raw else "未归属"
+
+        aid = _art_id(p)
+        if aid in seen:                     # 同一文件被多个会话记过，只留一条
+            continue
+        rec = {
+            "id": aid,
+            "path": str(p),
+            "name": it["name"],
+            "ext": p.suffix.lower(),
+            "kind": _art_kind(p.suffix),
+            "size": size,
+            "mtime": mtime,
+            "exists": exists,
+            "is_entry": p.name.lower() in {n.lower() for n in _ART_ENTRY_NAMES},
+            "project": proj_name,
+            "project_key": proj_key or "(未归属)",
+            "project_path": cwd_raw,
+            "session_id": it["sid"],
+            "session_title": (s.get("custom_title") or s.get("title") or "")[:60],
+            "tool": it["tool"],
+            "refs": [],
+            "ref_by": [],
+            "version_index": 1,
+            "version_total": 1,
+            "protected": False,
+            "protect_reason": "",
+        }
+        seen[aid] = rec
+        items.append(rec)
+
+    # ---- 4. 依赖检测：只对存在的文本产物读内容 ----
+    by_path = {}
+    for it in items:
+        if it["exists"]:
+            try:
+                by_path[str(Path(it["path"]).resolve()).lower()] = it
+            except (OSError, ValueError):
+                pass
+
+    budget = 96 * 1024 * 1024          # 本次扫描允许读取的总字节
+    for it in items:
+        if not it["exists"] or it["ext"] not in _ART_TEXT_EXT:
+            continue
+        p = Path(it["path"])
+        try:
+            sz = p.stat().st_size
+        except (OSError, ValueError):
+            continue
+        if sz > budget:
+            continue
+        budget -= sz
+        try:
+            base = p.parent.resolve()
+        except (OSError, ValueError):
+            base = p.parent
+        for tgt in _art_refs_of(p, base):
+            hit = by_path.get(tgt.lower())
+            if hit and hit["id"] != it["id"]:
+                it["refs"].append(hit["id"])
+                hit["ref_by"].append(it["id"])
+        if budget <= 0:
+            break
+
+    # ---- 5. 同名版本链（同一项目 + 同一文件名） ----
+    # 按时间正序编号：v1 是最早那版，序号最大的就是最新版。
+    # 反过来的话界面上会把最新版标成 v1，看着像旧文件。
+    byname = {}
+    for it in items:
+        byname.setdefault((it["project_key"], it["name"].lower()), []).append(it)
+    for group in byname.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda x: (x["mtime"], x["size"]))
+        last = len(group) - 1
+        for i, it in enumerate(group):
+            it["version_index"] = i + 1
+            it["version_total"] = len(group)
+            it["is_latest"] = (i == last)
+
+    # ---- 6. 删除保护：被引用 / 目录入口 / 同名最新版 ----
+    for it in items:
+        if it["ref_by"]:
+            it["protected"] = True
+            it["protect_reason"] = f"被 {len(it['ref_by'])} 个产物引用，删了那些会打不开或破图"
+        elif it["is_entry"] and it["version_total"] == 1:
+            it["protected"] = True
+            it["protect_reason"] = "这是所在目录的入口文件，删掉整个产出就打不开了"
+        elif it.get("is_latest"):
+            it["protected"] = True
+            it["protect_reason"] = f"同名文件里最新的一版（共 {it['version_total']} 版），删了就没法回退"
+
+    # ---- 7. 捆绑组：同一会话 + 同一目录 = 一次任务的一次产出 ----
+    bundles = {}
+    for it in items:
+        parent = os.path.dirname(it["path"]).lower()
+        key = f"{it['session_id']}|{parent}"
+        it["bundle"] = key
+        b = bundles.setdefault(key, {"key": key, "session_id": it["session_id"],
+                                     "session_title": it["session_title"],
+                                     "dir": os.path.dirname(it["path"]),
+                                     "project": it["project"], "count": 0})
+        b["count"] += 1
+    for it in items:
+        it["bundle_count"] = bundles[it["bundle"]]["count"]
+        it["bundle_label"] = f"{os.path.basename(it['bundle'].split('|')[1]) or '根目录'} 的 {it['bundle_count']} 个产出"
+
+    # ---- 8. 按项目合并成文件夹 ----
+    proj = {}
+    for it in items:
+        k = it["project_key"]
+        p = proj.setdefault(k, {
+            "key": k, "name": it["project"], "path": it["project_path"],
+            "count": 0, "exists": 0, "missing": 0, "size": 0,
+            "protected": 0, "types": {}, "recent": 0,
+            "sessions": set(), "preview": [],
+        })
+        p["count"] += 1
+        p["exists" if it["exists"] else "missing"] += 1
+        p["size"] += it["size"]
+        p["protected"] += 1 if it["protected"] else 0
+        p["types"][it["kind"]] = p["types"].get(it["kind"], 0) + 1
+        p["recent"] = max(p["recent"], it["mtime"])
+        p["sessions"].add(it["session_id"])
+
+    # 文件夹封面：优先挑存在的、有代表性的 4 个
+    for it in sorted(items, key=lambda x: (not x["exists"], -x["mtime"])):
+        p = proj.get(it["project_key"])
+        if p and len(p["preview"]) < 4 and it["exists"]:
+            p["preview"].append({"id": it["id"], "name": it["name"], "kind": it["kind"]})
+
+    projects = []
+    for p in proj.values():
+        p["sessions"] = len(p["sessions"])
+        projects.append(p)
+    projects.sort(key=lambda x: (-x["count"], x["name"]))
+
+    total_size = sum(i["size"] for i in items if i["exists"])
+    data = {
+        "has_index": True,
+        "index_dir": str(idx_dir),
+        "projects": projects,
+        "items": items,
+        "bundles_count": len(bundles),
+        "bad_index": bad_idx,
+        "trash": art_trash_list(),
+        "stats": {
+            "total": len(items),
+            "exists": sum(1 for i in items if i["exists"]),
+            "missing": sum(1 for i in items if not i["exists"]),
+            "size": total_size,
+            "projects": len(projects),
+            "protected": sum(1 for i in items if i["protected"]),
+            "bundles": len(bundles),
+        },
+    }
+    _ART_CACHE.update(t=now, data=data)
+    return data
+
+
+def _art_find(aid: str):
+    """按 ID 找产物。找不到就返回 None——不抛异常，调用方统一提示。"""
+    for it in scan_artifacts()["items"]:
+        if it["id"] == aid:
+            return it
+    return None
+
+
+def art_open(ids):
+    """用系统默认程序打开产物。丢失的文件不打开，直接说明原因。"""
+    opened, skipped = [], []
+    for aid in (ids or [])[:20]:
+        it = _art_find(aid)
+        if not it:
+            skipped.append({"id": aid, "why": "索引里找不到这个产物"})
+            continue
+        if not it["exists"]:
+            skipped.append({"id": aid, "name": it["name"], "why": "文件已不在原位置（被清理或搬走了）"})
+            continue
+        try:
+            if IS_WIN:
+                os.startfile(it["path"])          # noqa: S606 - 打开用户自己的文件
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open",
+                                  it["path"]], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            opened.append({"id": aid, "name": it["name"]})
+        except OSError as e:
+            skipped.append({"id": aid, "name": it["name"], "why": f"打不开：{e}"})
+    return {"opened": opened, "skipped": skipped}
+
+
+def art_reveal(aid):
+    """在资源管理器里选中这个文件。"""
+    it = _art_find(aid)
+    if not it:
+        return {"error": "索引里找不到这个产物"}
+    if not it["exists"]:
+        return {"error": "文件已不在原位置，只能定位到不存在的路径"}
+    try:
+        if IS_WIN:
+            subprocess.Popen(["explorer", f"/select,{it['path']}"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["open", "-R" if sys.platform == "darwin" else "--reveal",
+                              it["path"]], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        return {"ok": True, "path": it["path"]}
+    except OSError as e:
+        return {"error": f"定位失败：{e}"}
+
+
+def art_trash(ids, force=False):
+    """把产物移进回收站（移动，不直接删，可还原）。
+
+    被引用的产物默认拦下来：删掉它，引用它的页面就会破图或打不开。
+    用户确认要走 force 才会真移走，并在返回里说清会影响谁。
+    """
+    tdir = _art_trash_dir()
+    try:
+        tdir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"error": f"回收站目录建不出来：{e}"}
+
+    moved, blocked, skipped = [], [], []
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    man = _art_trash_manifest()
+
+    for n, aid in enumerate((ids or [])[:200]):
+        it = _art_find(aid)
+        if not it:
+            skipped.append({"id": aid, "why": "索引里找不到这个产物"})
+            continue
+        if not it["exists"]:
+            skipped.append({"id": aid, "name": it["name"], "why": "文件已不在原位置，无从删除"})
+            continue
+        if it["protected"] and not force:
+            blocked.append({"id": aid, "name": it["name"],
+                            "why": it["protect_reason"],
+                            "ref_by": it["ref_by"][:5]})
+            continue
+        src = Path(it["path"])
+        dest = tdir / f"{stamp}-{aid}-{src.name}"
+        try:
+            shutil.move(str(src), str(dest))
+        except OSError as e:
+            skipped.append({"id": aid, "name": it["name"], "why": f"移动失败：{e}"})
+            continue
+        rec = {"id": aid, "name": it["name"], "orig": str(src),
+               "trashed": str(dest), "size": it["size"],
+               "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "project": it["project"], "session_id": it["session_id"]}
+        try:
+            with man.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+        moved.append({"id": aid, "name": it["name"],
+                      "affects": [x for x in it["ref_by"][:5]]})
+
+    _ART_CACHE["data"] = None            # 状态变了，下次扫描重新读
+    if moved:
+        log_action("删除产物", len(moved), None,
+                   f"移入回收站 {len(moved)} 个" + ("（含被引用项）" if force else ""))
+    return {"moved": moved, "blocked": blocked, "skipped": skipped,
+            "trash_dir": str(tdir)}
+
+
+def art_trash_list():
+    """回收站里的产物，按移入时间倒序。"""
+    man = _art_trash_manifest()
+    out = []
+    if not man.is_file():
+        return out
+    try:
+        lines = man.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        dest = Path(r.get("trashed") or "")
+        r["still_there"] = dest.is_file()
+        out.append(r)
+    out.sort(key=lambda x: x.get("at") or "", reverse=True)
+    return out
+
+
+def art_trash_restore(ids):
+    """从回收站还原回原路径。原位置已被占用时改名，不覆盖。"""
+    ids = set(ids or [])
+    if not ids:
+        return {"error": "没指定要还原的产物"}
+    man = _art_trash_manifest()
+    if not man.is_file():
+        return {"error": "回收站是空的"}
+    try:
+        lines = [ln for ln in man.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError as e:
+        return {"error": f"读不了回收站清单：{e}"}
+
+    restored, skipped, keep = [], [], []
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if r.get("id") not in ids:
+            keep.append(ln)
+            continue
+        src = Path(r.get("trashed") or "")
+        dst = Path(r.get("orig") or "")
+        if not src.is_file():
+            skipped.append({"name": r.get("name"), "why": "回收站里这份文件已经没了"})
+            continue
+        if dst.exists():
+            dst = dst.with_name(f"{dst.stem}_还原{dst.suffix}")
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            restored.append({"name": r.get("name"), "path": str(dst)})
+        except OSError as e:
+            skipped.append({"name": r.get("name"), "why": f"还原失败：{e}"})
+            continue
+
+    try:
+        man.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+    except OSError:
+        pass
+    _ART_CACHE["data"] = None
+    if restored:
+        log_action("还原产物", len(restored), None, f"从回收站还原 {len(restored)} 个")
+    return {"restored": restored, "skipped": skipped}
+
+
+def art_trash_purge(ids=None):
+    """彻底删掉回收站里的文件。不传 ids 就清空整个回收站。"""
+    man = _art_trash_manifest()
+    if not man.is_file():
+        return {"purged": 0, "freed": 0}
+    want = set(ids or [])
+    try:
+        lines = [ln for ln in man.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError as e:
+        return {"error": f"读不了回收站清单：{e}"}
+
+    purged, freed, keep = 0, 0, []
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if want and r.get("id") not in want:
+            keep.append(ln)
+            continue
+        p = Path(r.get("trashed") or "")
+        try:
+            if p.is_file():
+                sz = p.stat().st_size
+                p.unlink()
+                purged += 1
+                freed += sz
+        except OSError:
+            keep.append(ln)
+            continue
+    try:
+        man.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+    except OSError:
+        pass
+    if purged:
+        log_action("彻底删除产物", purged, None, f"从回收站清除 {purged} 个，释放 {freed // 1024} KB")
+    return {"purged": purged, "freed": freed}
+
+
 def scan_trash(limit=400):
     """列出被删除的会话，并判断还能不能救。
 
@@ -2454,6 +3020,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, plan_rehome((qs.get("root") or [""])[0] or None))
             elif path == "/api/disks":
                 self._send(200, scan_disks())
+            elif path == "/api/artifacts":
+                qs = parse_qs(urlparse(self.path).query)
+                self._send(200, scan_artifacts(force="1" in (qs.get("force") or [])))
+            elif path == "/api/artifacts/trash":
+                self._send(200, {"trash": art_trash_list(),
+                                 "dir": str(_art_trash_dir())})
             elif path == "/api/types":
                 self._send(200, {"types": [
                     {"emoji": e, "name": n, "keys": k} for e, n, k in rules.TYPE_RULES
@@ -2537,6 +3109,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, save_config(body))
             elif path == "/api/naming/auto":
                 self._send(200, naming_auto(body.get("ids")))
+            elif path == "/api/artifacts/open":
+                self._send(200, art_open(body.get("ids") or []))
+            elif path == "/api/artifacts/reveal":
+                self._send(200, art_reveal(body.get("id") or ""))
+            elif path == "/api/artifacts/trash":
+                self._send(200, art_trash(body.get("ids") or [],
+                                          bool(body.get("force"))))
+            elif path == "/api/artifacts/restore":
+                self._send(200, art_trash_restore(body.get("ids") or []))
+            elif path == "/api/artifacts/purge":
+                self._send(200, art_trash_purge(body.get("ids")))
             elif path == "/api/archive":
                 self._send(200, archive_sessions(body.get("ids") or [],
                                                  bool(body.get("archive", True))))
