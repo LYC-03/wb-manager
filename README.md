@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/icon.png" width="88" alt="会话管家">
+</p>
+
 # WorkBuddy 会话整理工具 · 使用说明
 
 一句话：把 WorkBuddy 侧栏里那一堆重名、没归位、看不出在干嘛的会话，一次性整理干净。
