@@ -69,6 +69,120 @@ def _fatal(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def _box(msg: str, title: str, icon: int = 0x40):
+    """弹一个原生提示框。打包版没有控制台，结果只能这么告诉用户。
+
+    设了环境变量 WB_SILENT 就只打印不弹框，方便自动化验收时跑一遍不打扰人。
+    """
+    print(msg)
+    if not IS_WIN or os.environ.get("WB_SILENT"):
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, msg, title,
+                                         icon | 0x10000)   # SETFOREGROUND
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def install_desktop_shortcut():
+    """在桌面建一个指向本程序的快捷方式。
+
+    为什么不用 PowerShell：`安装到桌面.bat` 原本靠 powershell 调 WScript.Shell 的
+    COM 对象，但有些机器上安全策略会直接拦掉 COM 实例化，脚本一行没执行就退出，
+    用户看到的现象就是「双击了，桌面什么也没多」。这里改成 ctypes 直接调
+    Windows 自带的 IShellLink，不经过 PowerShell、也不需要装 pywin32。
+    """
+    import ctypes
+    from ctypes import wintypes, POINTER, byref, c_void_p, c_uint, c_int, c_wchar_p
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+    def _guid(s):
+        g = GUID()
+        if ctypes.windll.ole32.CLSIDFromString(c_wchar_p(s), byref(g)) != 0:
+            raise OSError(f"CLSID 解析失败: {s}")
+        return g
+
+    def _call(obj, index, restype, *argtypes):
+        """取 COM 虚表第 index 个函数并调它。前 3 个固定是 QI/AddRef/Release。"""
+        vt = ctypes.cast(obj, POINTER(c_void_p))[0]
+        fn = ctypes.cast(vt, POINTER(c_void_p))[index]
+        return ctypes.WINFUNCTYPE(restype, c_void_p, *argtypes)(fn)
+
+    # 目标：打包版就是自己；源码运行就找同目录的 exe，找不到就用 python 本体
+    exe = sys.executable if getattr(sys, "frozen", False) else ""
+    if not exe:
+        cand = HERE / "wb-manager.exe"
+        exe = str(cand) if cand.exists() else sys.executable
+    if not Path(exe).exists():
+        _box(f"找不到要指向的程序：\n  {exe}\n\n把本文件和 wb-manager.exe 放在同一个文件夹再试。",
+             "没建成快捷方式", 0x30)
+        return 1
+
+    desk = ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        # CSIDL_DESKTOPDIRECTORY = 0x0010，桌面被挪到别的盘也能拿到真实位置
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0:
+            desk = buf.value
+    except Exception:  # noqa: BLE001
+        pass
+    if not desk:
+        _box("读不到桌面路径。可以直接把 wb-manager.exe 拖到桌面，效果一样。",
+             "没建成快捷方式", 0x30)
+        return 1
+
+    lnk = Path(desk) / "WorkBuddy 会话整理.lnk"
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitializeEx(None, 2)
+    link = c_void_p()
+    persist = c_void_p()
+    try:
+        hr = ole32.CoCreateInstance(
+            byref(_guid("{00021401-0000-0000-C000-000000000046}")), None, 1,
+            byref(_guid("{000214F9-0000-0000-C000-000000000046}")), byref(link))
+        if hr != 0 or not link:
+            raise OSError(f"创建 IShellLink 失败 hr=0x{hr & 0xFFFFFFFF:08X}")
+        # 20 SetPath / 9 SetWorkingDirectory / 7 SetDescription / 17 SetIconLocation
+        _call(link, 20, ctypes.HRESULT, c_wchar_p, wintypes.DWORD)(link, exe, 0)
+        _call(link, 9, ctypes.HRESULT, c_wchar_p)(link, str(HERE))
+        _call(link, 7, ctypes.HRESULT, c_wchar_p)(
+            link, "WorkBuddy 会话整理 · 批量改名 / 移到空间 / 产物合集")
+        _call(link, 17, ctypes.HRESULT, c_wchar_p, c_int)(link, exe + ",0", 0)
+
+        # QueryInterface 拿 IPersistFile，Save 才真正写盘
+        hr = _call(link, 0, ctypes.HRESULT, POINTER(GUID), POINTER(c_void_p))(
+            link, byref(_guid("{0000010b-0000-0000-C000-000000000046}")),
+            byref(persist))
+        if hr != 0 or not persist:
+            raise OSError(f"取 IPersistFile 失败 hr=0x{hr & 0xFFFFFFFF:08X}")
+        hr = _call(persist, 6, ctypes.HRESULT, c_wchar_p, wintypes.BOOL)(
+            persist, str(lnk), True)
+        if hr != 0:
+            raise OSError(f"写快捷方式失败 hr=0x{hr & 0xFFFFFFFF:08X}")
+    except OSError as e:
+        _box(f"建快捷方式时出错：\n  {e}\n\n"
+             "可以退一步：直接把 wb-manager.exe 拖到桌面，效果一样。",
+             "没建成快捷方式", 0x10)
+        return 1
+    finally:
+        try:
+            if persist:
+                _call(persist, 2, ctypes.c_ulong)(persist)
+            if link:
+                _call(link, 2, ctypes.c_ulong)(link)
+            ole32.CoUninitialize()
+        except Exception:  # noqa: BLE001
+            pass
+
+    _box(f"已经在桌面建好了：\n  {lnk}\n\n以后直接双击桌面那个图标就行，"
+         f"不用再进这个文件夹。", "装好了", 0x40)
+    return 0
+
+
 def check_app_dir_writable():
     """数据目录能不能写。写不进去就别让它跑到一半再崩。
 
@@ -3287,9 +3401,15 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--db", help="手动指定 workbuddy.db 路径")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--install-shortcut", action="store_true",
+                    help="在桌面建快捷方式后退出，不起服务")
     # 允许把 workbuddy.db 直接拖到 exe 上：这时候文件路径是位置参数
     ap.add_argument("dropped", nargs="?", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    # 装快捷方式不需要数据库、也不需要写权限检查，先处理掉
+    if args.install_shortcut:
+        sys.exit(install_desktop_shortcut())
 
     # 数据目录写不进去就别往下走了：备份、历史、port.txt 全靠它
     if not check_app_dir_writable():
