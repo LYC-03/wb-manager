@@ -53,6 +53,9 @@ _shot_ui.mjs
 wb-manager-*.ico
 _icon_refresh.py
 _verify_lnk.py
+_shot_docs.mjs
+_trim_shots.py
+_demo_seed.py
 
 # PyInstaller 打包产物（自己构建，不入库）
 build/
