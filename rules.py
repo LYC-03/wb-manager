@@ -141,19 +141,16 @@ def suggest(row, style="emoji"):
         return f"{emoji} {name}" if emoji else name
 
     if is_auto:
-        label = AUTOMATION_LABEL.get(raw)
-        if not label:
-            label = re.sub(r"（.*?）|\(.*?\)|每日|自动|定时", "", raw).strip() or raw[:12]
-        if style == "emoji":
-            after = f"🔁 {label}{SEP}{mmdd(row.get('created_at'))}"
-        elif style == "plain":
-            after = f"{label} {mmdd(row.get('created_at'))}"
-        else:
-            after = f"{mmdd(row.get('created_at'))} {label}"
+        # 定时任务不归这个工具管。WorkBuddy 已经把这些会话收进独立的
+        # 定时任务分类，标题也由它按日期自己生成。工具再插一手只会越改越乱：
+        # 旧版在这里每次运行都往前面补一个 🔁 和一段日期，而且不先剥旧的，
+        # 跑两次就成了「🔁 🔁 美团领券｜09-29｜09-29」，跑三次还会更长。
+        # 所以这里直接返回原名：after == raw 时 changed 恒为 False，
+        # 它永远不会出现在「待改」清单里，一键整理也碰不到。
         return {
-            "after": after,
+            "after": raw,
             "emoji": "🔁", "type_name": "定时",
-            "why": "定时任务：固定格式带日期，避免每天同名",
+            "why": "定时任务：由 WorkBuddy 统一管理，这里保持原名不动",
             "conflict": False,
         }
 

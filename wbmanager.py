@@ -1213,6 +1213,7 @@ def apply_titles(pairs):
     snap = snapshot("before-apply")
     con = connect(write=True)
     changed = 0
+    skipped_auto = 0
     try:
         with con:
             for p in pairs:
@@ -1223,16 +1224,110 @@ def apply_titles(pairs):
                 t = re.sub(r"\s+", " ", t).strip()[:200]
                 if not t or not p.get("id"):
                     continue
-                cur = con.execute("SELECT custom_title FROM sessions WHERE id=?",
-                                  (p["id"],)).fetchone()
-                if cur is None or (cur["custom_title"] or "") == t:
+                cur = con.execute(
+                    "SELECT custom_title, is_background_automation FROM sessions WHERE id=?",
+                    (p["id"],)).fetchone()
+                if cur is None:
+                    continue
+                # 定时任务的标题归 WorkBuddy 管，这里一律不写。
+                # 闸设在这一层是因为上面还有 AI 命名、手动应用、一键整理
+                # 好几个入口，逐个堵容易漏；这里堵住，所有路径都过不去。
+                if cur["is_background_automation"]:
+                    skipped_auto += 1
+                    continue
+                if (cur["custom_title"] or "") == t:
                     continue
                 con.execute("UPDATE sessions SET custom_title=? WHERE id=?", (t, p["id"]))
                 changed += 1
     finally:
         con.close()
     log_action("改标题", changed, snap, f"{len(pairs)} 条提交")
-    return {"changed": changed, "snapshot": snap}
+    out = {"changed": changed, "snapshot": snap}
+    if skipped_auto:
+        out["skipped_auto"] = skipped_auto
+    return out
+
+
+_AUTO_PREFIX = re.compile(
+    r"^((?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)+)(.*)$", re.S)
+
+
+def auto_title_fix(title):
+    """把定时任务标题里重复叠出来的部分收敛掉，返回修好的标题。
+
+    旧版规则引擎对定时任务每次都往前面补一个 🔁 和一段日期，而且不先剥旧的，
+    所以跑两次就成了「🔁 🔁 美团领券｜09-29｜09-29」，跑三次更长。
+
+    这里只做两件最保守的事：前缀只留一个、相邻重复的段去掉。
+    不改主体文字、不改日期，结果形如「🔁 美团领券｜09-29」。
+    没有需要收敛的地方就返回 None，让调用方跳过。
+    """
+    raw = re.sub(r"\s+", " ", (title or "").strip())
+    if not raw:
+        return None
+    m = _AUTO_PREFIX.match(raw)
+    if m:
+        prefix, rest = m.group(1).strip(), m.group(2).strip()
+        syms = [c for c in prefix if not c.isspace() and c != "\uFE0F"]
+        uniq = []
+        for c in syms:
+            if not uniq or uniq[-1] != c:
+                uniq.append(c)
+        prefix = " ".join(uniq)
+    else:
+        prefix, rest = "", raw
+    segs = [s.strip() for s in rest.split("｜")]
+    dedup = []
+    for s in segs:
+        if s and (not dedup or dedup[-1] != s):
+            dedup.append(s)
+    if not dedup:
+        return None
+    body = "｜".join(dedup)
+    fixed = f"{prefix} {body}" if prefix else body
+    return fixed if fixed != raw else None
+
+
+def auto_title_issues():
+    """列出标题被叠重复了的定时任务，给「一次性收敛」用。"""
+    out = []
+    for i in load_sessions():
+        if not i["auto"]:
+            continue
+        fixed = auto_title_fix(i["current"])
+        if fixed:
+            out.append({"id": i["id"], "current": i["current"], "after": fixed})
+    return out
+
+
+def fix_auto_titles(dry_run=False):
+    """把定时任务被叠重复的标题收敛回单层。
+
+    这是修工具自己造成的损坏，不是给定时任务改名——目标格式
+    （🔁 名称｜日期）本来就是旧版第一次运行时的结果。
+    以后不再跑：suggest() 对定时任务已经直接返回原名，apply_titles 也拒绝写。
+    """
+    issues = auto_title_issues()
+    if dry_run or not issues:
+        return {"count": len(issues), "items": issues[:80],
+                "changed": 0, "dry_run": bool(dry_run)}
+    snap = snapshot("before-auto-fix")
+    con = connect(write=True)
+    changed = 0
+    try:
+        with con:
+            for it in issues:
+                # 只认定时任务，防止手误传进普通会话的 id
+                con.execute(
+                    "UPDATE sessions SET custom_title=? "
+                    "WHERE id=? AND is_background_automation=1",
+                    (it["after"], it["id"]))
+                changed += 1
+    finally:
+        con.close()
+    log_action("收敛定时任务标题", changed, snap, f"{len(issues)} 条")
+    return {"count": len(issues), "changed": changed, "snapshot": snap,
+            "need_restart": True}
 
 
 def esc_dir_name(cwd):
@@ -2574,9 +2669,12 @@ def organize_all(dry_run=False):
     dry_run=True 时只返回「将要改什么」，不写任何东西——给检查窗口用。
     """
     items = load_sessions()
+    # 定时任务明确排除，不靠 changed 间接挡：它在 WorkBuddy 那边有独立分类，
+    # 标题也由那边维护。工具一旦碰它，就会变成两边各改一套。
     picked = [
         x for x in items
-        if x["changed"] and not x["conflict"] and not x["active"] and not x["archived"]
+        if x["changed"] and not x["conflict"] and not x["active"]
+        and not x["archived"] and not x["auto"]
     ]
     if dry_run:
         return {
@@ -2586,17 +2684,20 @@ def organize_all(dry_run=False):
             "skipped_confirm": sum(1 for x in items if x["conflict"] and not x["archived"]),
             "skipped_active": sum(1 for x in items if x["active"]),
             "skipped_archived": sum(1 for x in items if x["archived"]),
+            "skipped_auto": sum(1 for x in items if x["auto"] and not x["archived"]),
         }
     pairs = [{"id": x["id"], "title": x["suggest"]} for x in picked]
     skipped_confirm = sum(1 for x in items if x["conflict"] and not x["archived"])
     skipped_active = sum(1 for x in items if x["active"])
+    skipped_auto = sum(1 for x in items if x["auto"] and not x["archived"])
     if not pairs:
         return {"changed": 0, "snapshot": None, "pairs": [],
-                "skipped_confirm": skipped_confirm, "skipped_active": skipped_active}
+                "skipped_confirm": skipped_confirm, "skipped_active": skipped_active,
+                "skipped_auto": skipped_auto}
     r = apply_titles(pairs)
     return {"changed": r.get("changed", 0), "snapshot": r.get("snapshot"),
             "skipped_confirm": skipped_confirm, "skipped_active": skipped_active,
-            "need_restart": True}
+            "skipped_auto": skipped_auto, "need_restart": True}
 
 
 def backups_cleanup(keep=20):
@@ -3164,6 +3265,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, export_naming())
             elif path == "/api/paths":
                 self._send(200, scan_path_styles())
+            elif path == "/api/auto/check":
+                # 定时任务标题被叠重复的清单，只读，给界面显示用
+                self._send(200, fix_auto_titles(dry_run=True))
             elif path == "/api/storage":
                 self._send(200, storage_info())
             elif path == "/api/archive/list":
@@ -3228,6 +3332,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, preview_move(body.get("pairs") or []))
             elif path == "/api/backup":
                 self._send(200, {"snapshot": snapshot("manual")})
+            elif path == "/api/auto/fix":
+                self._send(200, fix_auto_titles(dry_run=False))
             elif path == "/api/backups/delete":
                 self._send(200, delete_backup(body.get("name") or ""))
             elif path == "/api/backups/cleanup":

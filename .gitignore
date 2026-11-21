@@ -54,6 +54,7 @@ wb-manager-*.ico
 _icon_refresh.py
 _verify_lnk.py
 _shot_docs.mjs
+_shot_auto.mjs
 _trim_shots.py
 _demo_seed.py
 
