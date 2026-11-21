@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-BLUE = (0, 113, 227, 255)
+BLUE = (77, 128, 239, 255)   # WorkBuddy brand-blue #4d80ef
 WHITE = (255, 255, 255, 255)
 SS = 4                      # 超采样倍数
 
@@ -73,7 +73,7 @@ def write_svg(path: Path) -> None:
     S = 256
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {S} {S}" '
              f'width="{S}" height="{S}" fill="none">',
-             f'  <rect width="{S}" height="{S}" rx="{round(S * RADIUS)}" fill="#0071e3"/>']
+             f'  <rect width="{S}" height="{S}" rx="{round(S * RADIUS)}" fill="#4d80ef"/>']
     for ln, hh, cy in BARS:
         w = round(S * ln)
         h = round(S * hh)

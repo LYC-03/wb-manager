@@ -4,118 +4,186 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>wb-manager · 会话管家</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230071e3'/%3E%3Cpath d='M18 20h28a7 7 0 0 1 7 7v10a7 7 0 0 1-7 7H31l-9 8v-8h-4a7 7 0 0 1-7-7V27a7 7 0 0 1 7-7z' fill='%23fff'/%3E%3Cpath d='M25 32l6 6 11-11' stroke='%230071e3' stroke-width='4.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234d80ef'/%3E%3Cpath d='M18 20h28a7 7 0 0 1 7 7v10a7 7 0 0 1-7 7H31l-9 8v-8h-4a7 7 0 0 1-7-7V27a7 7 0 0 1 7-7z' fill='%23fff'/%3E%3Cpath d='M25 32l6 6 11-11' stroke='%234d80ef' stroke-width='4.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
+/* ===== 设计变量：对齐 WorkBuddy 插件体系 =====
+   色值不是估的，取自 WorkBuddy 37.10.3-43 的设计变量定义：
+   画布 gray-1 #fafafa、内嵌面 gray-3 #f2f2f2、主色 brand-blue #4d80ef。
+   下面 --bg / --card / --ink 这些旧名字全部改成别名指向新体系，
+   这样全文件三千多行引用一行都不用改，换皮只换这一处。
+   文字色用各色阶的深位（orange-9 / red-8 / green-9），
+   WorkBuddy 的 vivid 色是给图标和圆点用的，直接当正文字会糊。 */
 :root{
-  --bg:#f5f5f7;--card:#fff;--ink:#1d1d1f;--ink2:#6e6e73;--ink3:#86868b;
-  --line:#e5e5e7;--blue:#0071e3;--blue-bg:#eef5fd;
-  --warn:#b25e00;--warn-bg:#fff7e8;--bad:#c8322b;--bad-bg:#fdf0ef;
-  --ok:#1a7f4b;--ok-bg:#eef8f2;
-  --r8:8px;--r14:14px;--r22:22px;
+  --wb-canvas:#fafafa;      /* 页面底 */
+  --wb-surface:#fff;        /* 卡片面 */
+  --wb-sunken:#f2f2f2;      /* 内嵌区块 */
+  --wb-hover:#f7f7f7;       /* 悬停 */
+  --wb-pressed:#ebebeb;     /* 按下 */
+  --wb-text:#000;           /* 主文字 black-100 */
+  --wb-text-2:#000000b3;    /* 次文字 black-70 */
+  --wb-text-3:#00000080;    /* 三级 black-50 */
+  --wb-text-4:#0000004d;    /* 禁用 black-30 */
+  --wb-border:#dedede;      /* border-solid */
+  --wb-border-soft:#f2f2f2;
+  --wb-brand:#4d80ef;       /* 主色 */
+  --wb-brand-strong:#0052d9;
+  --wb-brand-soft:#eaf2ff;
+  --wb-warn:#c04100;--wb-warn-soft:#ffeddf;
+  --wb-danger:#af191a;--wb-danger-soft:#fce8e8;
+  --wb-ok:#088f50;--wb-ok-soft:#e7f8f0;
+  --wb-shadow-card:0 1px 2px #0000000a;
+  --wb-shadow-card-hover:0 8px 20px #0000001f;
+  --wb-shadow-dialog:0 8px 48px -4px #0000001f,0 2px 8px #0000000a;
+  --wb-shadow-popup:0 6px 24px #0000000a,0 4px 6px #0000000a;
+  --wb-ring:0 0 0 2px #1a79ff1a;
+  --wb-ease:cubic-bezier(.4,0,.2,1);
+
+  /* 旧名 → 新体系（别名层，勿删） */
+  --bg:var(--wb-canvas);--card:var(--wb-surface);--soft:var(--wb-hover);
+  --ink:var(--wb-text);--ink2:var(--wb-text-2);--ink3:var(--wb-text-3);
+  --line:var(--wb-border);--blue:var(--wb-brand);--blue-bg:var(--wb-brand-soft);
+  --warn:var(--wb-warn);--warn-bg:var(--wb-warn-soft);
+  --bad:var(--wb-danger);--bad-bg:var(--wb-danger-soft);
+  --ok:var(--wb-ok);--ok-bg:var(--wb-ok-soft);
+  /* 圆角收敛到 WorkBuddy 的档位：6 / 8 / 12 / 16 */
+  --r8:8px;--r14:12px;--r22:16px;
 }
 html,body{width:100%;max-width:100%}
 body{
   background:var(--bg);color:var(--ink);
-  font:400 16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  /* WorkBuddy 的正文是 14px：16px 读起来像网页，14px 才是插件的密度。
+     中文字体栈也按它的顺序，PingFang SC 在前，Windows 上自然回落到雅黑。 */
+  font:400 14px/1.6 "PingFang SC",-apple-system,BlinkMacSystemFont,"Segoe UI",
+       "Microsoft YaHei",sans-serif;
   -webkit-font-smoothing:antialiased;
-  padding:max(24px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right))
+  padding:max(20px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right))
           max(96px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left));
 }
 .wrap{max-width:1320px;margin:0 auto;width:100%}
 header{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap}
-h1{font-size:clamp(19px,3vw,24px);font-weight:600;letter-spacing:-.02em;line-height:1.2}
-.sub{margin-top:8px;color:var(--ink2);font-size:14px;word-break:break-all}
+/* WorkBuddy 的标题不带负字距，靠字号和字重拉层级 */
+h1{font-size:20px;font-weight:600;letter-spacing:0;line-height:28px}
+.sub{margin-top:6px;color:var(--ink2);font-size:12px;line-height:18px;word-break:break-all}
 .hdr-actions{display:flex;gap:8px;flex-wrap:wrap}
+/* 标题行带一个插件身份标签，说明它是跑在 WorkBuddy 里的，
+   不是另一个独立应用——这是给用户看的位置信息，不是装饰。 */
+.ttlrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wbtag{display:inline-flex;align-items:center;height:18px;padding:0 7px;
+  border-radius:4px;background:var(--wb-brand-soft);color:var(--wb-brand-strong);
+  font-size:11px;font-weight:500;line-height:18px;letter-spacing:0;white-space:nowrap}
 
-.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:22px 0 16px}
-.stat{background:var(--card);border-radius:var(--r14);padding:14px 16px;min-width:0;
-  box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.stat .k{font-size:13px;color:var(--ink2)}
-.stat .v{font-size:clamp(17px,2.4vw,21px);font-weight:600;margin-top:2px;white-space:nowrap}
-.stat .d{font-size:12px;color:var(--ink3);margin-top:1px;white-space:nowrap;overflow:hidden;
-  text-overflow:ellipsis}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:18px 0 14px}
+/* 卡片靠「浅描边 + 极轻阴影」立起来，不再靠投影。
+   这是 WorkBuddy 的做法：面上留白干净，边界由 1px 线交代。 */
+.stat{background:var(--card);border:1px solid var(--wb-border-soft);
+  border-radius:var(--r14);padding:12px 14px;min-width:0;
+  box-shadow:var(--wb-shadow-card)}
+.stat .k{font-size:12px;line-height:18px;color:var(--ink2)}
+.stat .v{font-size:20px;font-weight:600;line-height:28px;margin-top:1px;
+  white-space:nowrap;letter-spacing:0}
+.stat .d{font-size:11px;line-height:16px;color:var(--ink3);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* 会话整理页：左边一条「最近 / 分组」导航，右边是原来的筛选和表格。
    窄屏退回单列，导航变成横向可滑的一排——手机上也顺手。 */
-.sess-wrap{display:grid;grid-template-columns:204px minmax(0,1fr);gap:18px;align-items:start}
-.rail{position:sticky;top:12px;background:var(--card);border:1px solid var(--line);
-  border-radius:var(--r14);padding:10px 8px 16px;max-height:calc(100vh - 96px);overflow:auto}
-.rail-h{font-size:11.5px;color:var(--ink3);font-weight:600;letter-spacing:.4px;
-  padding:9px 10px 5px;display:flex;align-items:center;gap:6px}
+.sess-wrap{display:grid;grid-template-columns:212px minmax(0,1fr);gap:16px;align-items:start}
+/* 侧栏不再做成一张独立卡片：WorkBuddy 的侧栏是融在画布里的，
+   只有悬停和选中才浮出底色，这样右侧内容才是唯一焦点。 */
+.rail{position:sticky;top:12px;padding:4px 0 12px;
+  max-height:calc(100vh - 96px);overflow:auto}
+.rail-h{font-size:11px;color:var(--ink3);font-weight:600;letter-spacing:.2px;
+  padding:10px 8px 5px;display:flex;align-items:center;gap:6px}
 .rail-item{display:flex;align-items:center;gap:8px;width:100%;appearance:none;
-  border:0;background:transparent;font:inherit;font-size:13.5px;color:var(--ink);
-  text-align:left;padding:6px 10px;border-radius:var(--r8);cursor:pointer;min-height:34px}
-.rail-item:hover{background:var(--soft)}
-.rail-item[aria-current="true"]{background:var(--ink);color:#fff}
-.rail-item[aria-current="true"] .n{color:rgba(255,255,255,.72)}
+  border:0;background:transparent;font:inherit;font-size:13px;color:var(--ink2);
+  text-align:left;padding:6px 8px;border-radius:var(--r8);cursor:pointer;min-height:32px;
+  transition:background .12s var(--wb-ease),color .12s var(--wb-ease)}
+.rail-item:hover{background:#00000008;color:var(--ink)}
+/* 选中用浅灰胶囊 + 文字转深加粗。黑底白字那种重色块在插件里太抢，
+   而且会和主按钮打架，看起来像两个主操作。
+   灰度给到 8%：5% 在 #fafafa 上几乎看不出来，反而像没选中。 */
+.rail-item[aria-current="true"]{background:#0000001a;color:var(--ink);font-weight:600}
+.rail-item[aria-current="true"] .n{color:var(--ink2);font-weight:600}
 .rail-item .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rail-item .n{font-size:12px;color:var(--ink3);flex:none;font-variant-numeric:tabular-nums}
+.rail-item .n{font-size:11.5px;color:var(--ink3);flex:none;font-variant-numeric:tabular-nums}
 .rail-item .pin{flex:none;width:5px;height:5px;border-radius:50%;background:var(--blue)}
-.rail-empty{font-size:12.5px;color:var(--ink3);padding:6px 10px 10px;line-height:1.6}
+.rail-empty{font-size:12px;color:var(--ink3);padding:6px 8px 10px;line-height:1.6}
 @media (max-width:900px){
   .sess-wrap{grid-template-columns:1fr;gap:10px}
-  .rail{position:static;max-height:none;display:flex;gap:6px;overflow-x:auto;
-    border-radius:var(--r14);padding:7px;scrollbar-width:none}
+  /* 横向时给一层内嵌底色，读起来像分段控件，横向滑动也有边界感 */
+  .rail{position:static;max-height:none;display:flex;gap:4px;overflow-x:auto;
+    background:var(--wb-sunken);border-radius:var(--r14);padding:5px;scrollbar-width:none}
   .rail::-webkit-scrollbar{display:none}
   .rail-h{display:none}
-  .rail-item{width:auto;white-space:nowrap;min-height:40px;padding:7px 12px}
+  .rail-item{width:auto;white-space:nowrap;min-height:36px;padding:6px 12px}
+  .rail-item[aria-current="true"]{background:var(--card);box-shadow:var(--wb-shadow-card)}
   .rail-empty{display:none}
 }
 
 /* ===== 产物合集：像手机主屏幕那样，按项目合并成文件夹 =====
    文件夹是圆角方块，里面摆 4 个缩略当作封面；点开铺满一层浮层，
    每个产物是一个带图标的小格子。层级放在 50：确认框（60）能盖住它。 */
-.art-top{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:16px 0 18px}
+.art-top{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:14px 0 16px}
 .art-search{flex:1;min-width:220px;position:relative}
-.art-search input{width:100%;box-sizing:border-box;appearance:none;border:1px solid var(--line);
-  background:var(--card);border-radius:var(--r14);padding:11px 14px 11px 38px;
-  font:inherit;font-size:14px;color:var(--ink);min-height:42px}
-.art-search input:focus{outline:none;border-color:var(--blue);
-  box-shadow:0 0 0 3px rgba(0,113,227,.12)}
-.art-search .ico{position:absolute;left:13px;top:50%;transform:translateY(-50%);
+/* 输入框按 WorkBuddy 的做法：默认浅底无边框，聚焦时才浮出白面和描边。
+   这样页面上少一圈框线，视线更集中在内容上。 */
+.art-search input{width:100%;box-sizing:border-box;appearance:none;
+  border:1px solid transparent;background:var(--wb-sunken);
+  border-radius:var(--r8);padding:8px 12px 8px 34px;
+  font:inherit;font-size:13px;color:var(--ink);min-height:32px;
+  transition:background .14s var(--wb-ease),border-color .14s var(--wb-ease),
+             box-shadow .14s var(--wb-ease)}
+.art-search input::placeholder{color:var(--wb-text-3)}
+.art-search input:hover{background:var(--wb-pressed)}
+.art-search input:focus{outline:none;background:var(--card);
+  border-color:var(--wb-brand);box-shadow:var(--wb-ring)}
+.art-search .ico{position:absolute;left:11px;top:50%;transform:translateY(-50%);
   color:var(--ink3);pointer-events:none;display:flex}
+.art-search .ico svg{width:15px;height:15px}
 
-.art-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(166px,1fr));
-  gap:16px;margin-bottom:8px}
-.art-folder{background:var(--card);border:1px solid transparent;border-radius:var(--r22);
-  padding:13px 13px 12px;cursor:pointer;text-align:left;font:inherit;color:inherit;
-  box-shadow:0 1px 3px rgba(0,0,0,.05);
-  transition:transform .2s cubic-bezier(.22,.61,.36,1),box-shadow .2s,border-color .2s}
-.art-folder:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.09)}
-.art-folder:active{transform:scale(.985)}
-.art-folder:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.art-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));
+  gap:12px;margin-bottom:8px}
+/* 文件夹卡片保持「主屏幕」的隐喻，但反馈方式和别的卡片统一：
+   悬停只加深描边和阴影，不做整块位移。 */
+.art-folder{background:var(--card);border:1px solid var(--wb-border-soft);
+  border-radius:var(--r22);padding:12px 12px 11px;cursor:pointer;text-align:left;
+  font:inherit;color:inherit;box-shadow:var(--wb-shadow-card);
+  transition:box-shadow .16s var(--wb-ease),border-color .16s var(--wb-ease),
+             background .16s var(--wb-ease)}
+.art-folder:hover{box-shadow:var(--wb-shadow-card-hover);border-color:var(--wb-border)}
+.art-folder:active{background:var(--wb-hover)}
+.art-folder:focus-visible{outline:none;box-shadow:var(--wb-ring)}
 .art-thumbs{display:grid;grid-template-columns:1fr 1fr;gap:5px;aspect-ratio:1/1;
-  background:var(--bg);border-radius:16px;padding:7px;margin-bottom:11px}
-.art-thumb{background:var(--card);border-radius:9px;display:flex;align-items:center;
+  background:var(--wb-sunken);border-radius:12px;padding:6px;margin-bottom:10px}
+.art-thumb{background:var(--card);border-radius:8px;display:flex;align-items:center;
   justify-content:center;overflow:hidden;min-width:0}
-.art-thumb svg{width:19px;height:19px}
-.art-thumb.void{background:transparent;box-shadow:inset 0 0 0 1px var(--line)}
-.art-fname{font-size:13.5px;font-weight:600;letter-spacing:-.01em;line-height:1.32;
+.art-thumb svg{width:18px;height:18px}
+.art-thumb.void{background:transparent;box-shadow:inset 0 0 0 1px var(--wb-border)}
+.art-fname{font-size:13px;font-weight:600;letter-spacing:0;line-height:1.35;
   overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
   word-break:break-all}
-.art-fmeta{font-size:12px;color:var(--ink3);margin-top:3px;display:flex;gap:6px;
-  flex-wrap:wrap;align-items:center}
+.art-fmeta{font-size:11.5px;color:var(--ink3);margin-top:3px;display:flex;gap:5px;
+  flex-wrap:wrap;align-items:center;line-height:16px}
 .art-fmeta .dot{width:3px;height:3px;border-radius:50%;background:var(--ink3);flex:none}
 
 /* 展开后的浮层：像点开 iOS 文件夹那样铺一层 */
 .art-ov{position:fixed;inset:0;z-index:50;display:none;align-items:center;
-  justify-content:center;padding:22px;background:rgba(0,0,0,.26);
-  -webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px)}
+  justify-content:center;padding:22px;background:rgba(0,0,0,.32);
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
 .art-ov.on{display:flex}
 .art-panel{background:var(--card);border-radius:var(--r22);width:100%;max-width:1000px;
   max-height:86vh;display:flex;flex-direction:column;overflow:hidden;
-  box-shadow:0 26px 72px rgba(0,0,0,.26);animation:artIn .22s cubic-bezier(.22,.61,.36,1)}
-@keyframes artIn{from{opacity:0;transform:translateY(14px) scale(.985)}
+  box-shadow:var(--wb-shadow-dialog);animation:artIn .2s var(--wb-ease)}
+@keyframes artIn{from{opacity:0;transform:translateY(10px) scale(.99)}
   to{opacity:1;transform:none}}
-.art-panel-hd{display:flex;align-items:center;gap:12px;padding:16px 20px;
-  border-bottom:1px solid var(--line);flex-wrap:wrap}
-.art-panel-hd .ttl{font-size:16px;font-weight:600;letter-spacing:-.01em;min-width:0;
+.art-panel-hd{display:flex;align-items:center;gap:12px;padding:14px 18px;
+  border-bottom:1px solid var(--wb-border-soft);flex-wrap:wrap}
+.art-panel-hd .ttl{font-size:15px;font-weight:600;letter-spacing:0;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.art-panel-hd .sub2{font-size:12.5px;color:var(--ink3);margin-top:1px}
-.art-panel-bd{padding:20px;overflow:auto;flex:1}
-.art-panel-ft{padding:11px 20px;border-top:1px solid var(--line);display:flex;
-  gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2)}
+.art-panel-hd .sub2{font-size:11.5px;color:var(--ink3);margin-top:1px;line-height:16px}
+.art-panel-bd{padding:18px;overflow:auto;flex:1}
+.art-panel-ft{padding:10px 18px;border-top:1px solid var(--wb-border-soft);display:flex;
+  gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--ink2)}
 
 /* 产物格子：图标 + 名字，右下角带状态点 */
 .app-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(94px,1fr));
@@ -236,21 +304,35 @@ h1{font-size:clamp(19px,3vw,24px);font-weight:600;letter-spacing:-.02em;line-hei
   .art-row .nm .l2{white-space:normal}
 }
 
-.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
-.chip{appearance:none;font:inherit;font-size:14px;padding:8px 14px;min-height:44px;
-  border:1px solid var(--line);background:var(--card);color:var(--ink2);
-  border-radius:var(--r8);cursor:pointer;white-space:nowrap}
-.chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
-@media (hover:hover){.chip:hover{border-color:#cfcfd4}}
-.btn{appearance:none;font:inherit;font-size:15px;font-weight:500;padding:10px 18px;min-height:44px;
-  border:0;border-radius:var(--r8);background:var(--blue);color:#fff;cursor:pointer;white-space:nowrap}
-.btn:disabled{background:#c9c9ce;cursor:not-allowed}
-.btn.ghost{background:var(--card);color:var(--ink);border:1px solid var(--line)}
-@media (hover:hover){.btn:not(:disabled):hover{filter:brightness(.94)}}
-.btn:focus-visible,.chip:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+/* 控件尺寸按 WorkBuddy 的控件档位：常规 32、大 36。
+   原来 44 是为了手指瞎点也算得中，桌面端就偏肥了；
+   触摸端（下面 768 断点）再抬回 40，两边各自合适。 */
+.chip{appearance:none;font:inherit;font-size:13px;padding:6px 12px;min-height:32px;
+  border:1px solid var(--wb-border);background:var(--card);color:var(--ink2);
+  border-radius:var(--r8);cursor:pointer;white-space:nowrap;
+  transition:background .12s var(--wb-ease),border-color .12s var(--wb-ease),
+             color .12s var(--wb-ease)}
+/* 选中态用主色软底 + 主色字，不再用黑底白字：
+   黑块跟主按钮一个重量，界面上就出现了两个"主操作"。 */
+.chip[aria-pressed="true"]{background:var(--wb-brand-soft);
+  border-color:#4d80ef4d;color:var(--wb-brand-strong);font-weight:500}
+@media (hover:hover){.chip:hover{border-color:#c9c9c9;color:var(--ink)}}
+.btn{appearance:none;font:inherit;font-size:13px;font-weight:500;padding:7px 14px;
+  min-height:32px;border:0;border-radius:var(--r8);background:var(--wb-brand);color:#fff;
+  cursor:pointer;white-space:nowrap;
+  transition:background .12s var(--wb-ease),transform .1s var(--wb-ease)}
+.btn:disabled{background:#d9d9d9;color:#fff;cursor:not-allowed}
+.btn.ghost{background:var(--card);color:var(--ink);border:1px solid var(--wb-border)}
+@media (hover:hover){
+  .btn:not(:disabled):hover{background:var(--wb-brand-strong)}
+  .btn.ghost:not(:disabled):hover{background:var(--wb-hover);border-color:#c9c9c9}
+}
+/* 焦点环用 WorkBuddy 的 focus 阴影，不是 2px 实线——实线会把控件撑胖一圈 */
+.btn:focus-visible,.chip:focus-visible{outline:none;box-shadow:var(--wb-ring)}
 
 .card{background:var(--card);border-radius:var(--r14);overflow:hidden;
-  box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  border:1px solid var(--wb-border-soft);box-shadow:var(--wb-shadow-card)}
 .tblwrap{overflow-x:auto}
 /* 表头跟走的两个前提：
    1) 表格外不能有 overflow 祖先（.card 的 overflow:hidden 会挡住 sticky）
@@ -263,25 +345,36 @@ h1{font-size:clamp(19px,3vw,24px);font-weight:600;letter-spacing:-.02em;line-hei
 }
 /* border-collapse:collapse 会让 th 的 sticky 在 Chrome 里失效，
    所以要 separate + 间距 0，边框改由单元格自己画 */
-table{width:100%;border-collapse:separate;border-spacing:0;font-size:14px;min-width:860px}
-th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
-th{font-weight:600;font-size:13px;color:var(--ink2);white-space:nowrap;
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:860px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--wb-border-soft);
+  vertical-align:middle}
+th{font-weight:600;font-size:12px;color:var(--ink2);white-space:nowrap;
   position:sticky;top:0;background:var(--card);z-index:2;
-  box-shadow:inset 0 -1px 0 var(--line)}
+  box-shadow:inset 0 -1px 0 var(--wb-border)}
 tbody tr:last-child td{border-bottom:0}
-@media (hover:hover){tbody tr:hover{background:#fafafb}}
+@media (hover:hover){tbody tr:hover{background:var(--wb-hover)}}
 /* 归档行淡一点，一眼能看出它不是当前在用的 */
 tbody tr.isarch td.cur,tbody tr.isarch td.dir,tbody tr.isarch td.sug{opacity:.5}
 td.cur{color:var(--ink2);max-width:280px}
 td.cur span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 td.dir{color:var(--ink3);font-size:13px;max-width:170px;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
-input[type=text]{font:inherit;font-size:14px;width:100%;min-width:200px;padding:7px 10px;
-  border:1px solid var(--line);border-radius:var(--r8);background:#fff;color:var(--ink)}
-input[type=text]:focus{outline:2px solid var(--blue);outline-offset:-1px;border-color:transparent}
-input[type=checkbox]{width:20px;height:20px;accent-color:var(--blue);cursor:pointer}
-.tag{display:inline-block;padding:2px 8px;border-radius:var(--r8);font-size:12px;
-  background:#f2f2f4;color:var(--ink2);white-space:nowrap}
+/* 输入框和产物页搜索框同一套规则：浅底无框，聚焦才浮出白面和描边。
+   两处输入框长得不一样会显得是两个产品拼起来的。 */
+input[type=text]{font:inherit;font-size:13px;width:100%;min-width:200px;padding:6px 10px;
+  border:1px solid transparent;border-radius:var(--r8);background:var(--wb-sunken);
+  color:var(--ink);min-height:32px;
+  transition:background .14s var(--wb-ease),border-color .14s var(--wb-ease),
+             box-shadow .14s var(--wb-ease)}
+input[type=text]::placeholder{color:var(--wb-text-3)}
+input[type=text]:hover{background:var(--wb-pressed)}
+input[type=text]:focus{outline:none;background:var(--card);border-color:var(--wb-brand);
+  box-shadow:var(--wb-ring)}
+input[type=checkbox]{width:16px;height:16px;accent-color:var(--wb-brand);cursor:pointer}
+/* 标签用 4px 圆角：8px 会和按钮撞成同一个形状，读起来分不清哪个能点 */
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;
+  line-height:17px;background:var(--wb-sunken);color:var(--ink2);white-space:nowrap;
+  font-weight:500}
 .tag.blue{background:var(--blue-bg);color:var(--blue)}
 .tag.warn{background:var(--warn-bg);color:var(--warn)}
 .tag.ok{background:var(--ok-bg);color:var(--ok)}
@@ -350,8 +443,9 @@ table.fit td.dir{max-width:none}
 /* 二层详情弹窗：盖在第一层上面，专属返回键 */
 .sheet.on.sheet2{z-index:40;background:rgba(0,0,0,.42)}
 .sheet.on .card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
-  width:min(760px,92vw);max-height:82vh;overflow:auto;padding:26px 28px 22px;
-  box-shadow:0 18px 50px rgba(0,0,0,.22);animation:cardin .24s cubic-bezier(.32,.72,.36,1)}
+  width:min(760px,92vw);max-height:82vh;overflow:auto;padding:24px 26px 20px;
+  border-radius:var(--r22);box-shadow:var(--wb-shadow-dialog);
+  animation:cardin .24s var(--wb-ease)}
 .sheet.on .card.wide{width:min(980px,94vw)}
 .sheet .close{position:absolute;right:12px;top:10px;appearance:none;border:0;
   background:transparent;font-size:22px;line-height:1;color:var(--ink3);cursor:pointer;
@@ -371,9 +465,9 @@ table.fit td.dir{max-width:none}
 .askmask{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.28);
   display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .18s}
 .askmask.on{opacity:1}
-.askbox{background:var(--card);border-radius:14px;padding:22px 24px 18px;
-  width:min(450px,88vw);box-shadow:0 18px 50px rgba(0,0,0,.22);
-  transform:translateY(8px);transition:transform .18s}
+.askbox{background:var(--card);border-radius:var(--r22);padding:20px 22px 16px;
+  width:min(450px,88vw);box-shadow:var(--wb-shadow-dialog);
+  transform:translateY(8px);transition:transform .18s var(--wb-ease)}
 .askmask.on .askbox{transform:none}
 .asktext{margin:0 0 20px;font-size:15px;line-height:1.65;white-space:pre-line;
   color:var(--ink);word-break:break-word}
@@ -393,6 +487,8 @@ table.fit td.dir{max-width:none}
 @media (max-width:768px){
   html,body{overflow-x:hidden}
   body{padding-left:16px;padding-right:16px}
+  /* 触摸端把控件抬回 40：桌面 32 的高度用手指点会误触 */
+  .btn,.chip{min-height:40px;font-size:14px}
   .stats{grid-template-columns:repeat(2,1fr)}
   table{min-width:0}
   th:nth-child(1),td:nth-child(1){width:44px}
@@ -418,37 +514,55 @@ table.fit td.dir{max-width:none}
 
 /* ===== APP 化：logo + 视图导航 + 主页 ===== */
 body[data-view="sessions"] .footbar{display:flex}
-.appbrand{display:flex;align-items:center;gap:14px;min-width:0}
-.applogo{width:44px;height:44px;flex:none;border-radius:10px;overflow:hidden;
-  box-shadow:0 4px 14px rgba(0,113,227,.25)}
+.appbrand{display:flex;align-items:center;gap:12px;min-width:0}
+.applogo{width:40px;height:40px;flex:none;border-radius:10px;overflow:hidden;
+  box-shadow:0 2px 8px rgba(77,128,239,.22)}
 .applogo svg{width:100%;height:100%;display:block}
-.tabs{display:flex;gap:4px;margin-top:14px;border-bottom:1px solid var(--line)}
-.tab{appearance:none;border:0;background:transparent;font:inherit;font-size:14px;color:var(--ink2);
-  padding:10px 18px;cursor:pointer;min-height:38px;border-radius:10px 10px 0 0;
-  border-bottom:2px solid transparent;margin-bottom:-1px}
-.tab:hover{background:#f5f5f7}
-.tab.on{color:var(--ink);font-weight:600;border-bottom-color:var(--blue)}
+/* 导航改成分段控件：底槽 + 选中胶囊。
+   下划线选项卡是网页的语汇，插件里一眼就能看出不是同一个东西。 */
+.tabs{display:flex;width:fit-content;max-width:100%;gap:2px;margin-top:16px;padding:3px;
+  background:var(--wb-sunken);border-radius:10px;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{appearance:none;border:0;background:transparent;font:inherit;font-size:13px;
+  color:var(--ink2);padding:6px 14px;cursor:pointer;min-height:30px;border-radius:8px;
+  white-space:nowrap;transition:background .14s var(--wb-ease),color .14s var(--wb-ease)}
+.tab:hover{color:var(--ink)}
+.tab.on{background:var(--card);color:var(--ink);font-weight:600;
+  box-shadow:0 1px 2px #0000000f,0 1px 1px #00000008}
+.tab:focus-visible{outline:none;box-shadow:var(--wb-ring)}
 .view{display:none}
 .view.on{display:block;animation:fadein .22s ease-out}
-.homecards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}
-.hcard{background:var(--card);border-radius:var(--r14);padding:16px;cursor:pointer;
-  border:1px solid transparent;display:flex;gap:12px;align-items:flex-start;text-align:left;
-  font:inherit;width:100%;min-height:88px;transition:transform .1s,box-shadow .15s}
-.hcard:hover{box-shadow:0 6px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
-.hcard:active{transform:scale(.98)}
-.hcard .hic{width:38px;height:38px;flex:none;border-radius:10px;display:grid;place-items:center;
-  background:var(--blue-bg);color:var(--blue)}
-.hcard .hic svg{width:20px;height:20px}
-.hcard .ht{font-size:15px;font-weight:600;color:var(--ink)}
-.hcard .hd{font-size:12.5px;color:var(--ink2);margin-top:3px;line-height:1.5}
-.hcard .badge{margin-left:auto;flex:none;font-size:12px;background:var(--blue-bg);color:var(--blue);
-  border-radius:999px;padding:2px 9px;font-weight:600;white-space:nowrap}
+.homecards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+/* 悬停不再把卡片顶起来：插件里整块位移会让人觉得布局在抖。
+   改成底色 + 描边 + 阴影三处同步微变，反馈还在但不打断视线。 */
+.hcard{background:var(--card);border-radius:var(--r14);padding:14px;cursor:pointer;
+  border:1px solid var(--wb-border-soft);display:flex;gap:12px;align-items:flex-start;
+  text-align:left;font:inherit;width:100%;min-height:84px;box-shadow:var(--wb-shadow-card);
+  transition:background .14s var(--wb-ease),border-color .14s var(--wb-ease),
+             box-shadow .14s var(--wb-ease)}
+.hcard:hover{background:var(--wb-hover);border-color:var(--wb-border);
+  box-shadow:var(--wb-shadow-card-hover)}
+.hcard:active{background:var(--wb-pressed)}
+.hcard:focus-visible{outline:none;box-shadow:var(--wb-ring)}
+.hcard .hic{width:36px;height:36px;flex:none;border-radius:8px;display:grid;place-items:center;
+  background:var(--wb-brand-soft);color:var(--wb-brand-strong)}
+.hcard .hic svg{width:19px;height:19px}
+.hcard .ht{font-size:14px;font-weight:600;color:var(--ink);display:block}
+.hcard .hd{font-size:12px;color:var(--ink2);margin-top:2px;line-height:1.5;display:block}
+/* 文字块自己撑开剩余宽度，别让角标把它挤窄 */
+.hcard > span:nth-of-type(2){flex:1;min-width:0}
+.hcard .badge{margin-left:auto;flex:none;font-size:11px;background:var(--wb-brand-soft);
+  color:var(--wb-brand-strong);border-radius:999px;padding:1px 7px;font-weight:600;
+  white-space:nowrap;line-height:18px}
 .hcard.bad .badge{background:var(--bad-bg);color:var(--bad)}
 .homewarn{margin-top:16px}
 @media (max-width:768px){
-  .homecards{grid-template-columns:repeat(2,1fr)}
-  .applogo{width:38px;height:38px}
-  .tab{padding:10px 14px}
+  /* 入口卡片在手机上改单列：两列时每张只有 171px，
+     扣掉图标和角标后文字区不到 80px，「批量改名」会被挤成竖排。 */
+  .homecards{grid-template-columns:1fr;gap:8px}
+  .hcard{min-height:0;padding:12px 14px;align-items:center}
+  .applogo{width:36px;height:36px}
+  .tab{padding:6px 12px}
 }
 
 @keyframes sheetin{from{opacity:0}to{opacity:1}}
@@ -462,6 +576,54 @@ tbody tr{animation:rowfade .15s ease-out}
 /* 按钮按下去轻微缩一下，松手弹回：给「点了有反应」一个触觉反馈 */
 .btn{transition:transform .1s}
 .btn:not(.disabled):active{transform:scale(.97)}
+
+/* ===== 排版收敛层 =====
+   上面各组件是逐个改的，这里把散落在业务样式里的字号统一收到
+   WorkBuddy 的四档：标题 15 / 正文 13 / 辅助 12 / 说明 11。
+   放在最后是为了让这一层赢过前面的单点定义，也方便以后一处调全站。 */
+
+/* 列表与详情 */
+.blist li{font-size:13px;padding:11px 16px}
+.blist .meta{font-size:12px}
+.art-row{min-height:48px;padding:8px 14px}
+.art-row .nm .l1 b{font-size:13px;font-weight:500}
+.art-row .nm .l2{font-size:11.5px;margin-top:1px}
+.art-row .sz{font-size:11.5px}
+.art-row .ic{width:30px;height:30px;border-radius:7px}
+.art-row .ic svg{width:15px;height:15px}
+.art-row .ops button{width:28px;height:28px;border-radius:6px}
+
+/* 说明与表单 */
+.steps{font-size:13px;line-height:1.7}
+.steps code{background:var(--wb-sunken);border-radius:4px;padding:1px 5px;font-size:12px}
+.out{background:var(--wb-sunken);border-radius:var(--r8);padding:11px 13px;font-size:12px}
+.out b{font-size:12px}
+.lab{font-size:13px;margin:14px 0 6px}
+.ta{font-size:13px;padding:9px 11px;border-color:var(--wb-border)}
+.ta:focus{outline:none;border-color:var(--wb-brand);box-shadow:var(--wb-ring)}
+.sub-h{font-size:13px;font-weight:600;margin:18px 0 6px;padding-top:14px;
+  color:var(--ink);text-transform:none}
+.asktext{font-size:14px;line-height:1.65;margin:0 0 18px}
+.empty{font-size:13px;padding:36px 20px;color:var(--ink2)}
+.art-hint{font-size:11.5px;line-height:1.6}
+.art-empty{font-size:13px}
+
+/* 底栏与提示 */
+.footbar{background:rgba(255,255,255,.9);border-top:1px solid var(--wb-border-soft);
+  padding:8px max(20px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+.footbar .n{font-size:13px}
+.footbar .n b{font-size:15px}
+/* 提示条用近黑而不是纯黑：纯黑在浅色界面上像一块洞 */
+.toast{background:#1f1f1f;padding:9px 18px;border-radius:var(--r8);font-size:13px;
+  box-shadow:var(--wb-shadow-popup)}
+.askmask{background:rgba(0,0,0,.32)}
+.sheet.on{background:rgba(0,0,0,.32)}
+.sheet.on.sheet2{background:rgba(0,0,0,.45)}
+.sheet .close:hover{background:var(--wb-hover)}
+.art-tag{font-size:10.5px;padding:0 5px;border-radius:4px;line-height:17px}
+.art-chips .chip{min-height:30px;padding:4px 10px;font-size:12.5px}
+.trash-bar{font-size:12.5px;padding:10px 14px;border-color:var(--wb-border-soft)}
+.art-panel-ft .btn{min-height:30px;font-size:12.5px}
 
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -487,14 +649,17 @@ tbody tr{animation:rowfade .15s ease-out}
     <span class="applogo" aria-hidden="true">
       <!-- 与 docs/icon.ico 同一套几何参数（256 坐标系），改图形要两边一起改 -->
       <svg viewBox="0 0 256 256" fill="none">
-        <rect width="256" height="256" rx="57" fill="#0071e3"/>
+        <rect width="256" height="256" rx="57" fill="#4d80ef"/>
         <rect x="57" y="65" width="153" height="32" rx="16" fill="#fff"/>
         <rect x="57" y="114" width="135" height="28" rx="14" fill="#fff"/>
         <rect x="57" y="164" width="118" height="23" rx="12" fill="#fff"/>
       </svg>
     </span>
     <div>
-      <h1 style="font-size:19px">会话管家</h1>
+      <div class="ttlrow">
+        <h1>会话管家</h1>
+        <span class="wbtag">WorkBuddy 插件</span>
+      </div>
       <p class="sub" id="dbpath">正在读取…</p>
       <p class="sub" id="platwarn" hidden
          style="margin-top:6px;color:var(--warn);max-width:820px"></p>

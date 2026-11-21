@@ -85,6 +85,40 @@ def _box(msg: str, title: str, icon: int = 0x40):
         pass
 
 
+def _shortcut_icon():
+    """给桌面快捷方式找一份独立图标，返回路径；找不到返回 None。
+
+    为什么不让快捷方式直接引用 exe 的图标：Windows 是按 exe 路径缓存图标的，
+    换掉 exe 里的资源之后，桌面常常还显示旧图标，用户会以为「根本没换」——
+    上一版就踩了这个，重新打包、重建快捷方式都做了，桌面还是老样子。
+
+    所以这里把 ico 单独复制一份到程序目录，文件名带上内容哈希：
+    图标一改，文件名就变，不存在命中旧缓存的可能。
+    旧的那份顺手删掉，免得目录里越堆越多。
+    """
+    for src in (RES / "icon.ico", HERE / "icon.ico", HERE / "docs" / "icon.ico"):
+        if not src.is_file():
+            continue
+        try:
+            data = src.read_bytes()
+        except OSError:
+            continue
+        dst = HERE / f"wb-manager-{hashlib.sha1(data).hexdigest()[:8]}.ico"
+        try:
+            if not dst.is_file():
+                dst.write_bytes(data)
+            for old in HERE.glob("wb-manager-*.ico"):
+                if old.name != dst.name:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+            return dst
+        except OSError:
+            return None
+    return None
+
+
 def install_desktop_shortcut():
     """在桌面建一个指向本程序的快捷方式。
 
@@ -135,7 +169,19 @@ def install_desktop_shortcut():
              "没建成快捷方式", 0x30)
         return 1
 
-    lnk = Path(desk) / "WorkBuddy 会话整理.lnk"
+    # 名字和界面标题一致。顺带避开一个坑：Windows 的图标缓存是按
+    # 「快捷方式路径」做 key 的，同名重建永远命中旧条目，改完图标桌面
+    # 还显示旧的。换个新名字就是新 key，缓存必然 miss，图标当场生效。
+    lnk = Path(desk) / "会话管家.lnk"
+
+    # 旧名字留在桌面上的那个一并清掉，免得出现两个看起来一样的图标
+    for old_name in ("WorkBuddy 会话整理.lnk",):
+        old = Path(desk) / old_name
+        if old.is_file():
+            try:
+                old.unlink()
+            except OSError:
+                pass
     ole32 = ctypes.windll.ole32
     ole32.CoInitializeEx(None, 2)
     link = c_void_p()
@@ -151,7 +197,10 @@ def install_desktop_shortcut():
         _call(link, 9, ctypes.HRESULT, c_wchar_p)(link, str(HERE))
         _call(link, 7, ctypes.HRESULT, c_wchar_p)(
             link, "WorkBuddy 会话整理 · 批量改名 / 移到空间 / 产物合集")
-        _call(link, 17, ctypes.HRESULT, c_wchar_p, c_int)(link, exe + ",0", 0)
+        # 图标优先用独立 ico（带内容哈希，改图标必生效），拿不到才退回 exe 自带
+        icon = _shortcut_icon()
+        _call(link, 17, ctypes.HRESULT, c_wchar_p, c_int)(
+            link, str(icon or exe) + ",0", 0)
 
         # QueryInterface 拿 IPersistFile，Save 才真正写盘
         hr = _call(link, 0, ctypes.HRESULT, POINTER(GUID), POINTER(c_void_p))(

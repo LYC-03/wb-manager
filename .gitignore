@@ -47,6 +47,12 @@ demo-workspace/
 cdp_ux.mjs
 shot_v2.mjs
 shot_art.mjs
+_shot_ui.mjs
+
+# 建快捷方式时从图标复制出来的独立 ico（文件名带内容哈希，运行时生成）
+wb-manager-*.ico
+_icon_refresh.py
+_verify_lnk.py
 
 # PyInstaller 打包产物（自己构建，不入库）
 build/
