@@ -58,9 +58,18 @@ _shot_auto.mjs
 _trim_shots.py
 _demo_seed.py
 
+# 修复验收与调试脚本（本机路径）
+_shot_fix.mjs
+_dbg_esc.mjs
+_chk_art.mjs
+_stk.mjs
+_seed_old.py
+
 # PyInstaller 打包产物（自己构建，不入库）
 build/
 dist/
+dist_new/
+build_new/
 *.spec
 *.exe
 # 自测用的克隆库（含个人会话数据，绝不入库）

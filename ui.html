@@ -2520,7 +2520,15 @@ function artBindings(){
   $('artOvClose').onclick = closeArtOv;
   $('artOv').addEventListener('click', e => { if (e.target.id === 'artOv') closeArtOv(); });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && $('artOv').classList.contains('on')) closeArtOv();
+    // 确认框（ask() 动态创建）开着时让它优先处理 Esc——不然用户按 Esc 想取消
+    // 确认，结果确认框和这个浮层一起关，异步操作醒来还会踩到被 closeArtOv
+    // 置空的 ART_CUR。
+    // 判据用「节点还在不在」而不是「有没有 .on」：确认框被关时 on 是同步摘掉
+    // 的，但节点要 200ms 后才从 DOM 移除，同一轮按键里它一定还在。
+    // 代价是确认框关闭后的 200ms 内按 Esc 关不掉浮层，再按一次就行。
+    if (e.key === 'Escape'
+        && !document.querySelector('.askmask')
+        && $('artOv').classList.contains('on')) closeArtOv();
   });
 
   $('artRefresh').onclick = () => loadArtifacts(true);
@@ -2529,18 +2537,24 @@ function artBindings(){
   // 清理当前文件夹里的旧版本：这些都不受保护，批量移回收站是安全的
   $('artOvAll').onclick = async () => {
     if (ART_MODE !== 'project' || !ART_CUR) return;
+    // 先把当前文件夹固定到局部变量：确认框和强制重扫要好几秒，
+    // 这期间用户点浮层背景或按 Esc 就会把 ART_CUR 清成 null，
+    // 恢复执行时再读 ART_CUR.key 就是「操作出错了：reading 'key'」。
+    // 后面全程用 cur，不回头读 ART_CUR。
+    const cur = ART_CUR;
     const olds = (ART.items || []).filter(a =>
-      a.project_key === ART_CUR.key && a.version_total > 1 &&
+      a.project_key === cur.key && a.version_total > 1 &&
       a.version_index < a.version_total && a.exists);
     if (!olds.length){ toast('这个项目里没有可清理的旧版本'); return; }
     const ok = await ask(
-      `把「${ART_CUR.name}」里 ${olds.length} 个旧版本移到回收站？\n\n` +
+      `把「${cur.name}」里 ${olds.length} 个旧版本移到回收站？\n\n` +
       `同名文件的最新一代都留着，只清历史备份。删错可以在回收站还原。`, '清掉旧版本');
     if (!ok) return;
     const r = await api('/api/artifacts/trash', {ids: olds.map(o => o.id), force: true});
     toast(`已移走 ${(r.moved || []).length} 个旧版本`);
     await loadArtifacts(true);
-    openArtFolder(ART_CUR.key);
+    // 用户中途把浮层关了就不强行再弹开，免得像是自己会动的界面
+    if ($('artOv').classList.contains('on')) openArtFolder(cur.key);
   };
 }
 
