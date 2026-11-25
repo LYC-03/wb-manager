@@ -2,6 +2,12 @@
 config.json
 rules_local.py
 backups/
+
+# 数据库与本地数据：真库体积大、含全部会话内容，误提交等于泄露
+*.db
+*.db-wal
+*.db-journal
+_nodata/
 naming/
 history/
 artifact-trash/
