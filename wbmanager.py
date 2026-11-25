@@ -1229,6 +1229,9 @@ def apply_titles(pairs):
                     (p["id"],)).fetchone()
                 if cur is None:
                     continue
+                # ⛔ 铁律（2026-11-24）：所有定时任务的标题一律不写，这是全工具最后一道闸。
+                # 上面有 AI 命名、手动应用、一键整理、历史收敛好几个入口，逐个堵容易漏；
+                # 这里拦死，任何入口都过不去。删掉这一段等于把前面几层全部作废。
                 # 定时任务的标题归 WorkBuddy 管，这里一律不写。
                 # 闸设在这一层是因为上面还有 AI 命名、手动应用、一键整理
                 # 好几个入口，逐个堵容易漏；这里堵住，所有路径都过不去。
@@ -2613,6 +2616,10 @@ def archive_sessions(ids, archive=True):
        而 status='archived' 的会被明确跳过（archivedSkipped）——归档反而受保护。
 
     改完要重启 WorkBuddy 才看得到效果：它不监听外部改库。
+
+    和「定时任务只读」的关系：那条铁律管的是**工具自动去改名/归类**，
+    归档是用户自己勾选后点的手动动作，不在此限——否则定时任务攒多了没法清理。
+    工具不会自动归档任何会话，只做用户点了的那几条。
     """
     if not ids:
         return {"error": "没有选中会话", "changed": 0}
@@ -2669,6 +2676,9 @@ def organize_all(dry_run=False):
     dry_run=True 时只返回「将要改什么」，不写任何东西——给检查窗口用。
     """
     items = load_sessions()
+    # ⛔ 铁律（2026-11-24）：定时任务（全部，不是个别）不进整理候选。
+    # 别指望 changed 顺带挡住——auto 会话的 changed 恒为 False 只是当前实现巧合，
+    # 这里显式写 not x["auto"]，规则改了也拦得住。
     # 定时任务明确排除，不靠 changed 间接挡：它在 WorkBuddy 那边有独立分类，
     # 标题也由那边维护。工具一旦碰它，就会变成两边各改一套。
     picked = [
@@ -2906,7 +2916,8 @@ def preview_move(pairs):
         sid = p.get("id")
         new_cwd = rules.norm_path((p.get("cwd") or "").strip())
         row = con.execute(
-            "SELECT cwd, COALESCE(custom_title, title) t FROM sessions WHERE id=?",
+            "SELECT cwd, is_background_automation, "
+            "COALESCE(custom_title, title) t FROM sessions WHERE id=?",
             (sid,)).fetchone()
         if row is None:
             out.append({"id": sid, "title": "（会话不存在）", "status": "跳过",
@@ -2918,7 +2929,10 @@ def preview_move(pairs):
         dst = dst_dir / f"{sid}.jsonl"
 
         status, why = "可搬", ""
-        if rules.norm_path(old_cwd) == new_cwd:
+        if row["is_background_automation"]:
+            # ⛔ 铁律：定时任务只读。挪目录也是一种归类，一并不参与。
+            status, why = "跳过", "定时任务只读，不参与归类"
+        elif rules.norm_path(old_cwd) == new_cwd:
             status, why = "跳过", "目录没变"
         elif bad_target(new_cwd):
             status, why = "跳过", bad_target(new_cwd)
@@ -3060,8 +3074,15 @@ def move_sessions(pairs):
                 new_cwd = rules.norm_path((p.get("cwd") or "").strip())
                 if not sid or not new_cwd:
                     continue
-                row = con.execute("SELECT cwd FROM sessions WHERE id=?", (sid,)).fetchone()
+                row = con.execute(
+                    "SELECT cwd, is_background_automation FROM sessions WHERE id=?",
+                    (sid,)).fetchone()
                 if row is None:
+                    continue
+                # ⛔ 铁律：定时任务只读。上面预览层拦一次，这里是写库层再拦一次，
+                # 防止有人绕过界面直接调接口把定时任务搬走。
+                if row["is_background_automation"]:
+                    blocked.append({"id": sid, "why": "定时任务只读，不搬运"})
                     continue
                 old_cwd = row["cwd"] or ""
                 if rules.norm_path(old_cwd) == new_cwd:

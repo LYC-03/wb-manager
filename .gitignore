@@ -22,6 +22,7 @@ __pycache__/
 
 # 发布用的一次性脚本（只有作者本机用）
 发布到GitHub.bat
+重新打包.bat
 交付说明_*.html
 *_实现说明.html
 产品评测_*.html
