@@ -231,6 +231,27 @@ h1{font-size:20px;font-weight:600;letter-spacing:0;line-height:28px}
   border:1px solid var(--line)}
 .trash-bar .grow{flex:1;min-width:120px}
 
+/* 改了库还没重启的提醒条：写库类操作成功后自动出现，重启或忽略后消失 */
+.restartbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--wb-brand-soft);border:1px solid var(--wb-border);
+  border-radius:var(--r14);padding:11px 14px;margin:14px 0;font-size:13px;color:var(--ink)}
+.restartbar[hidden]{display:none}
+.restartbar .rbicon{display:flex;width:18px;height:18px;color:var(--wb-brand);flex:0 0 auto}
+.restartbar .rbicon svg{width:18px;height:18px}
+.restartbar .rbtext{flex:1;min-width:180px}
+.restartbar .btn,.restartbar .btn.ghost{min-height:32px;padding:0 14px;font-size:13px}
+
+/* 定时任务占位说明：纯只读，故意做得很轻，不抢正常会话的注意力 */
+.autonoise{background:var(--wb-sunken);border:1px solid var(--line);
+  border-radius:var(--r14);padding:12px 14px;margin:14px 0;font-size:12.5px;
+  color:var(--ink2);line-height:1.75}
+.autonoise[hidden]{display:none}
+.autonoise b{color:var(--ink);font-weight:600}
+.autonoise .rows{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:6px}
+.autonoise .row{display:flex;align-items:center;gap:6px}
+.autonoise .tag{background:var(--card);border:1px solid var(--line);
+  border-radius:999px;padding:1px 9px;font-size:12px;color:var(--ink)}
+
 /* 产物页的空态与说明 */
 .art-hint{font-size:12.5px;color:var(--ink3);line-height:1.6;margin-top:10px}
 
@@ -680,6 +701,19 @@ tbody tr{animation:rowfade .15s ease-out}
   <button id="btnPanel">备份与还原</button>
 </div>
 
+<!-- 改了库但没重启，WorkBuddy 界面上是看不到的。这里常驻提醒，一键替用户重启 -->
+<div class="restartbar" id="restartBar" hidden>
+  <span class="rbicon" aria-hidden="true">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+      <path d="M16 10a6 6 0 1 1-1.8-4.3" stroke-linecap="round"/>
+      <path d="M16 3.2V6.6h-3.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </span>
+  <span class="rbtext" id="restartText">改动已写入，重启 WorkBuddy 才看得到</span>
+  <button class="btn" id="btnRestartWb">重启 WorkBuddy</button>
+  <button class="btn ghost" id="btnRestartHide">待会再说</button>
+</div>
+
 <nav class="tabs" id="tabs" aria-label="视图">
   <button class="tab on" data-view="home">主页</button>
   <button class="tab" data-view="sessions">会话整理</button>
@@ -749,6 +783,9 @@ tbody tr{animation:rowfade .15s ease-out}
 <main id="viewSessions" class="view">
   <div class="stats" id="stats"></div>
 
+  <!-- 只读说明：定时任务占了多少侧栏位置。这里刻意不放任何操作按钮 -->
+  <div class="autonoise" id="autoNoise" hidden></div>
+
   <div class="sess-wrap">
     <aside class="rail" id="spaceRail" aria-label="最近与分组"></aside>
 
@@ -812,6 +849,7 @@ tbody tr{animation:rowfade .15s ease-out}
         placeholder="搜产物名、项目名或扩展名，比如 早报 / html / 工作台">
     </label>
     <button class="btn ghost" id="artRefresh">重新扫描</button>
+    <button class="btn ghost" id="artPurgeMissing" hidden>清理失效记录</button>
     <button class="btn ghost" id="artTrashBtn">回收站 <span id="artTrashN">0</span></button>
   </div>
 
@@ -1193,7 +1231,43 @@ async function api(path, body){
   const r = await fetch(path, opt);
   const d = await r.json();
   if (!r.ok || d.error) throw new Error(d.error || ('HTTP '+r.status));
+  if (d.need_restart) showRestartBar();
   return d;
+}
+
+/* 改动写进库了，但 WorkBuddy 只在启动时读一次库，不重启就看不到。
+   以前只在 toast 里写「重启后生效」，等于把活推回给用户；这里给一条常驻横条 + 一键重启。 */
+function showRestartBar(text){
+  const bar = $('restartBar');
+  if (!bar) return;
+  $('restartText').textContent = text || '改动已写入，重启 WorkBuddy 才看得到';
+  bar.hidden = false;
+}
+
+function hideRestartBar(){ const bar = $('restartBar'); if (bar) bar.hidden = true; }
+
+async function restartWorkbuddy(force){
+  const b = $('btnRestartWb');
+  const old = b.textContent;
+  b.disabled = true; b.textContent = '重启中…';
+  try{
+    const r = await api('/api/wb/restart', {force: !!force});
+    if (r.need_confirm){
+      // 有会话刚被写过，说明 AI 正在干活，掐掉会丢内容——先问一次
+      const who = (r.busy || []).map(x => '· ' + x.title).join('\n');
+      const go = await ask(`有 ${r.busy_count} 条会话正在使用中，重启会把正在进行的 AI 任务中断：\n\n` +
+        `${who || '（标题读取中）'}\n\n` +
+        `如果你手头没有正在跑的对话，继续就行；有的话先等它结束。`, '仍然重启');
+      if (!go) return;
+      return await restartWorkbuddy(true);
+    }
+    hideRestartBar();
+    toast(r.was_running ? '已重新打开 WorkBuddy，等一下就能看到改动' : 'WorkBuddy 已启动', 5000);
+  }catch(e){
+    toast('重启失败：' + e.message + '（可以手动关掉 WorkBuddy 再打开）', 6000);
+  }finally{
+    b.disabled = false; b.textContent = old;
+  }
 }
 
 /* ---------- 渲染 ---------- */
@@ -1214,11 +1288,32 @@ function renderStats(){
   $('stats').innerHTML = html;
   const hs = $('homeStats');
   if (hs) hs.innerHTML = html;
+  renderAutoNoise(s);
+}
+
+/* 定时任务占了多少位置：只说明，不提供任何操作。
+   这些记录由 WorkBuddy 按天生成，本工具一条都不改名、不归档。
+   要腾位置只有一种做法——去 WorkBuddy 侧栏里手动归档。 */
+function renderAutoNoise(s){
+  const box = $('autoNoise');
+  if (!box) return;
+  const by = s.auto_by_space || [];
+  if (!(s.auto > 0) || !by.length){ box.hidden = true; return; }
+  const rows = by.map(x =>
+    `<span class="row"><span class="tag">${esc(x.space)}</span>
+     <span>${x.count} 条${x.old ? `（${x.old} 条一个月前的）` : ''}</span></span>`).join('');
+  box.innerHTML =
+    `<b>${s.auto} 条自动任务记录</b>占着侧栏位置，本工具一条都不改、不归档` +
+    (s.auto_old_30d ? `，其中 ${s.auto_old_30d} 条是 30 天前的` : '') +
+    `。<div class="rows">${rows}</div>` +
+    `<div style="margin-top:6px">想腾位置就在 WorkBuddy 侧栏里手动归档它们；这里只显示统计，不会替你动手。</div>`;
+  box.hidden = false;
 }
 
 function renderFilters(){
   const s = STATE.stats || {};
-  const renamed = (STATE.items || []).filter(x=>x.has_custom).length;
+  // 已改名只数手动会话：定时任务全都有 custom_title，算进来会虚高成「92 条」
+  const renamed = (STATE.items || []).filter(x=>x.has_custom && !x.auto).length;
   const fs = [
     ['change','待改 ('+(s.need_change||0)+')'],
     ['conflict','需确认 ('+(s.conflict||0)+')'],
@@ -1716,6 +1811,10 @@ $('btnBackup').onclick = async ()=>{
 };
 
 $('btnReload').onclick = ()=>load().then(()=>toast('已刷新'));
+
+/* 重启 WorkBuddy：横条上那个按钮，和顶栏这个入口，走同一个函数 */
+$('btnRestartWb').onclick = ()=>restartWorkbuddy(false);
+$('btnRestartHide').onclick = ()=>hideRestartBar();
 $('btnPanel').onclick = ()=>enterMaint();
 
 /* ---------- AI 命名 ---------- */
@@ -2372,6 +2471,12 @@ function renderArtStats(){
   $('artStats').innerHTML = cards.map(([k, v, d]) =>
     `<div class="stat"><div class="k">${esc(k)}</div>
      <div class="v">${esc(v)}</div><div class="d">${esc(d)}</div></div>`).join('');
+  // 有失效记录才把这个按钮露出来，没有就别占位置
+  const pm = $('artPurgeMissing');
+  if (pm){
+    pm.hidden = !s.missing;
+    pm.textContent = s.missing ? `清理失效记录（${s.missing}）` : '清理失效记录';
+  }
 }
 
 function artAppHtml(a){
@@ -2532,6 +2637,40 @@ function artBindings(){
   });
 
   $('artRefresh').onclick = () => loadArtifacts(true);
+
+  /* 清理失效记录：只删索引里指向空路径的那些行，磁盘一个文件都不动 */
+  $('artPurgeMissing').onclick = async ()=>{
+    const b = $('artPurgeMissing');
+    b.disabled = true;
+    try{
+      const pre = await api('/api/artifacts/purge_missing', {dry_run:true});
+      if (pre.error){ toast(pre.error); return; }
+      if (!pre.removed){ toast('没有失效记录，索引是干净的'); return; }
+      // 页面上的「722 个文件已丢失」是去重后的文件数，这里要删的是索引条目数，
+      // 同一个文件被几个会话各记过一条就会差出几十上百，不说清楚用户会以为出错了
+      const missFiles = (ART && ART.stats && ART.stats.missing) || 0;
+      const ok = await ask(
+        `索引里有 ${pre.removed} 条记录指向已经不在原位置的文件` +
+        (missFiles && missFiles !== pre.removed
+          ? `（去重后是 ${missFiles} 个文件，同一个文件被几个会话各记了一条）` : '') +
+        `。\n\n` +
+        `清理只删这些「记录」，磁盘上的文件一个都不动——它们本来就不存在了。\n` +
+        `保留 ${pre.kept} 条还在位的记录，清理前会先把索引整个备份一份。\n\n` +
+        (pre.offline_skipped ? `另有 ${pre.offline_skipped} 条所在磁盘现在没插着，这次跳过不动。\n\n` : '') +
+        `清完之后，产物页上那些灰掉的块就没了，找东西时不会被它们占位置。`,
+        '清理失效记录');
+      if (!ok) return;
+      const r = await api('/api/artifacts/purge_missing', {});
+      if (r.error){ toast(r.error); return; }
+      await loadArtifacts(true);
+      toast(`清掉 ${r.removed} 条失效记录，保留 ${r.kept} 条` +
+        (r.failed && r.failed.length ? `；${r.failed.length} 个索引文件没写成` : ''), 5000);
+    }catch(e){
+      toast('清理失败：' + e.message, 5000);
+    }finally{
+      b.disabled = false;
+    }
+  };
   $('artTrashBtn').onclick = openTrash;
 
   // 清理当前文件夹里的旧版本：这些都不受保护，批量移回收站是安全的

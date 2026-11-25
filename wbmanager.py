@@ -579,6 +579,9 @@ def load_sessions():
 def stats(items):
     groups = {}
     dup = {}
+    auto_space = {}
+    now_ms = int(time.time() * 1000)
+    old_line = now_ms - 30 * 86400 * 1000
     # 有空间数据就按空间算（新库），一条空间都没有才退回按目录算（老库）
     has_space = any((i.get("space") or "").strip() for i in items)
     for i in items:
@@ -588,8 +591,17 @@ def stats(items):
             key = i["cwd_norm"] or "未归属"
         groups.setdefault(key, 0)
         groups[key] += 1
-        dup.setdefault(i["current"], 0)
-        dup[i["current"]] += 1
+        if i["auto"]:
+            # 定时任务不进重名统计：它们由 WorkBuddy 按日期批量生成标题，
+            # 算进来只会天天报「有 N 条重名」，而工具又一条都不改。
+            sp = (i.get("space") or "").strip() or "未归属"
+            d = auto_space.setdefault(sp, {"space": sp, "count": 0, "old": 0})
+            d["count"] += 1
+            if not i["archived"] and (i.get("last_active") or 0) < old_line:
+                d["old"] += 1
+        else:
+            dup.setdefault(i["current"], 0)
+            dup[i["current"]] += 1
 
     dup_groups = {k: v for k, v in dup.items() if v > 1}
     return {
@@ -605,6 +617,9 @@ def stats(items):
         "dup_detail": sorted(
             [{"title": k, "count": v} for k, v in dup_groups.items()],
             key=lambda x: -x["count"])[:10],
+        # 定时任务的只读统计：给用户看清「侧栏被什么占着」，工具不会替他动
+        "auto_old_30d": sum(v["old"] for v in auto_space.values()),
+        "auto_by_space": sorted(auto_space.values(), key=lambda x: -x["count"])[:6],
     }
 
 
@@ -1246,6 +1261,9 @@ def apply_titles(pairs):
         con.close()
     log_action("改标题", changed, snap, f"{len(pairs)} 条提交")
     out = {"changed": changed, "snapshot": snap}
+    # 前端靠这个标记弹出「重启 WorkBuddy」横条：改了库但不重启，界面上看不到变化
+    if changed:
+        out["need_restart"] = True
     if skipped_auto:
         out["skipped_auto"] = skipped_auto
     return out
@@ -1376,6 +1394,170 @@ def wb_running():
         return out.returncode == 0
     except Exception:  # noqa: BLE001
         return False
+
+
+def wb_pids():
+    """正在跑的 WorkBuddy 进程号（Electron 会有好几个）。
+
+    只认映像名精确等于 WorkBuddy.exe 的，不含后台那条 Remote Service——
+    名字不同，不会被这条筛到。拿不到就返回空，不抛异常。
+    """
+    if not IS_WIN:
+        return []
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq WorkBuddy.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=8).stdout or b""
+    except Exception:  # noqa: BLE001
+        return []
+    pids = []
+    for line in out.decode("mbcs", "replace").splitlines():
+        m = re.match(r'"([^"]+)","(\d+)"', line.strip())
+        if m and m.group(1).lower() == "workbuddy.exe":
+            pids.append(int(m.group(2)))
+    return pids
+
+
+_WB_EXE = {}
+
+
+def find_workbuddy_exe():
+    """找 WorkBuddy 主程序路径。
+
+    优先读注册表卸载项的 DisplayIcon（形如 "F:\\AI\\WorkBuddy\\WorkBuddy.exe,0"），
+    装在哪个盘都拿得到；读不到再试几个常见位置。找不到返回空字符串。
+    """
+    if "p" in _WB_EXE:
+        return _WB_EXE["p"]
+    found = ""
+    if IS_WIN:
+        try:
+            import winreg
+            roots = [
+                (winreg.HKEY_CURRENT_USER,
+                 r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_LOCAL_MACHINE,
+                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_LOCAL_MACHINE,
+                 r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            ]
+            for hive, root in roots:
+                try:
+                    k = winreg.OpenKey(hive, root)
+                except OSError:
+                    continue
+                try:
+                    n = winreg.QueryInfoKey(k)[0]
+                    for i in range(n):
+                        try:
+                            s = winreg.OpenKey(k, winreg.EnumKey(k, i))
+                        except OSError:
+                            continue
+                        try:
+                            name = str(winreg.QueryValueEx(s, "DisplayName")[0])
+                            if "workbuddy" in name.lower():
+                                try:
+                                    icon = str(winreg.QueryValueEx(s, "DisplayIcon")[0])
+                                except OSError:
+                                    icon = ""
+                                # DisplayIcon 常带 ",0" 这种图标序号，得剥掉
+                                p = re.sub(r",\s*-?\d+$", "", icon).strip('"').strip()
+                                if p.lower().endswith(".exe") and Path(p).exists():
+                                    found = p
+                                    break
+                        except OSError:
+                            pass
+                        finally:
+                            s.Close()
+                finally:
+                    k.Close()
+                if found:
+                    break
+        except Exception:  # noqa: BLE001
+            found = ""
+        if not found:
+            for p in (
+                r"F:\AI\WorkBuddy\WorkBuddy.exe",
+                str(Path(os.environ.get("LOCALAPPDATA") or "")
+                    / "Programs" / "WorkBuddy" / "WorkBuddy.exe"),
+                r"C:\Program Files\WorkBuddy\WorkBuddy.exe",
+            ):
+                if p and Path(p).exists():
+                    found = p
+                    break
+    _WB_EXE["p"] = found
+    return found
+
+
+def restart_workbuddy(force=False):
+    """关掉再打开 WorkBuddy，让刚写进库的改动立刻可见。
+
+    为什么要做这个：工具改的是数据库，WorkBuddy 只在启动时读一次，
+    所以以前每改一次标题都要用户自己关开软件。提示「重启后生效」等于把活推回去。
+
+    保护：有会话在 3 分钟内被写过（说明 AI 正在干活）就先不关，
+    返回 need_confirm 让界面问一次；用户确认后带 force 再进来。
+    """
+    pids = wb_pids()
+    # 「正在用」的判据比 is_active 宽：那边是 3 分钟内有文件写入，
+    # 但一个对话可能安静几分钟（在等模型回话），这时候重启会把它掐断。
+    # 这里放宽到 10 分钟，宁可多问一句。
+    recent = time.time() * 1000 - 10 * 60 * 1000
+    busy = [{"id": i["id"], "title": i["current"]}
+            for i in load_sessions()
+            if not i["archived"]
+            and (i["active"] or (i.get("last_active") or 0) > recent)]
+    if pids and busy and not force:
+        return {"need_confirm": True, "busy": busy[:5],
+                "busy_count": len(busy), "pids": len(pids)}
+
+    exe = find_workbuddy_exe()
+    killed_soft = False
+    forced = False
+    if pids:
+        # 不带 /F：等于请窗口自己关，Electron 会走正常退出流程
+        try:
+            subprocess.run(["taskkill", "/IM", "WorkBuddy.exe"],
+                           capture_output=True, timeout=15)
+            killed_soft = True
+        except Exception:  # noqa: BLE001
+            pass
+        for _ in range(24):          # 最多等 12 秒
+            if not wb_pids():
+                break
+            time.sleep(0.5)
+        if wb_pids():
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "WorkBuddy.exe"],
+                               capture_output=True, timeout=15)
+                forced = True
+            except Exception:  # noqa: BLE001
+                pass
+            for _ in range(12):
+                if not wb_pids():
+                    break
+                time.sleep(0.5)
+
+    alive = wb_pids()
+    if alive:
+        return {"error": "WorkBuddy 没能关掉（可能弹了确认框）。"
+                         "请先手动关掉它，再点一次重启。",
+                "left": len(alive)}
+
+    if not exe:
+        return {"error": "没找到 WorkBuddy 的主程序，请手动打开它。",
+                "stopped": True}
+
+    try:
+        subprocess.Popen([exe], close_fds=True,
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    except OSError as e:
+        return {"error": f"主程序没能启动：{e}", "exe": exe, "stopped": True}
+
+    log_action("重启 WorkBuddy", 1, None,
+               f"关掉 {len(pids)} 个进程后重新启动" + ("（强制）" if forced else ""))
+    return {"ok": True, "was_running": bool(pids), "forced": forced,
+            "started": True, "exe": exe}
 
 
 def is_active(path, seconds=180):
@@ -2321,6 +2503,89 @@ def art_trash_restore(ids):
     return {"restored": restored, "skipped": skipped}
 
 
+def _drive_alive(p):
+    """p 所在盘符现在还在不在。
+
+    外接盘/移动硬盘没插时，上面的文件也会「不存在」。这种不能当成真丢失去清索引，
+    否则插回硬盘就发现记录没了。盘符本身都点不亮，就直接跳过。
+    """
+    try:
+        drv = Path(p).drive
+        return bool(drv) and Path(drv + "\\").exists()
+    except OSError:
+        return False
+
+
+def art_purge_missing(dry_run=False):
+    """清掉产物索引里指向已不存在文件的记录。
+
+    只动索引，不碰磁盘：这些路径本来就没有文件了，没有可删的东西。
+    只要有一条记录所在盘符当前不可访问，就整条跳过，避免拔了移动硬盘误清。
+
+    清之前把整个 artifact-index 目录复制一份到备份目录，随时能还原。
+    """
+    idx_dir = _art_index_dir()
+    if not idx_dir.is_dir():
+        return {"error": "没找到产物索引目录，先让 WorkBuddy 正常出过产物再试。"}
+
+    plan, total_gone, total_keep, offline = [], 0, 0, 0
+    for f in sorted(idx_dir.glob("*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        arts = d.get("artifacts") or []
+        if not isinstance(arts, list):
+            continue
+        keep, gone = [], []
+        for a in arts:
+            if not isinstance(a, dict):
+                continue
+            p = _uri_to_path(a.get("uri") or "")
+            if p and p.exists():
+                keep.append(a)
+            elif p and not _drive_alive(p):
+                # 盘不在，判断不了真假，原样留着
+                keep.append(a)
+                offline += 1
+            else:
+                gone.append(a)
+        total_gone += len(gone)
+        total_keep += len(keep)
+        if gone:
+            plan.append((f, d, keep, len(gone)))
+
+    if dry_run or not total_gone:
+        return {"dry_run": True, "files": len(plan), "removed": total_gone,
+                "kept": total_keep, "offline_skipped": offline,
+                "changed": 0}
+
+    # 备份整个索引目录：这是一次性重写多个文件，坏了得有路可退
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = BACKUPS / f"artifact-index-{stamp}"
+    try:
+        shutil.copytree(idx_dir, dest)
+    except OSError as e:
+        return {"error": f"备份索引失败，为安全起见没有动：{e}"}
+
+    written, failed = 0, []
+    for f, d, keep, _n in plan:
+        d["artifacts"] = keep
+        try:
+            f.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            written += 1
+        except OSError as e:
+            failed.append({"file": f.name, "why": str(e)})
+
+    # 缓存里还留着旧的扫描结果，清掉让下次重新算
+    _ART_CACHE.update(t=0.0, data=None)
+    log_action("清理失效产物记录", total_gone, dest.name,
+               f"重写 {written} 个索引文件" + (f"，{len(failed)} 个失败" if failed else ""))
+    return {"removed": total_gone, "kept": total_keep, "files": written,
+            "failed": failed, "snapshot": dest.name, "offline_skipped": offline,
+            "changed": total_gone, "need_refresh": True}
+
+
 def art_trash_purge(ids=None):
     """彻底删掉回收站里的文件。不传 ids 就清空整个回收站。"""
     man = _art_trash_manifest()
@@ -3151,6 +3416,7 @@ def move_sessions(pairs):
                f"{len(blocked)} 条被跳过" if blocked else "")
     return {"changed": changed, "snapshot": snap, "blocked": blocked,
             "moved": moved, "cleaned_dirs": cleaned,
+            "need_restart": changed > 0,
             "wb_running": running}
 
 
@@ -3273,6 +3539,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ping":
                 ping()
                 self._send(200, {"ok": True})
+            elif path == "/api/wb/status":
+                pids = wb_pids()
+                self._send(200, {"running": bool(pids), "pids": len(pids),
+                                 "exe": find_workbuddy_exe()})
             elif path == "/api/state":
                 items = load_sessions()
                 self._send(200, {"stats": stats(items), "items": items,
@@ -3410,6 +3680,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, art_trash_restore(body.get("ids") or []))
             elif path == "/api/artifacts/purge":
                 self._send(200, art_trash_purge(body.get("ids")))
+            elif path == "/api/artifacts/purge_missing":
+                self._send(200, art_purge_missing(bool(body.get("dry_run"))))
+            elif path == "/api/wb/restart":
+                self._send(200, restart_workbuddy(bool(body.get("force"))))
             elif path == "/api/archive":
                 self._send(200, archive_sessions(body.get("ids") or [],
                                                  bool(body.get("archive", True))))
