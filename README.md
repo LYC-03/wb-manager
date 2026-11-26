@@ -126,7 +126,7 @@ WorkBuddy 我用了大半年，侧栏里堆了一百多条会话，一大半叫�
 
 本仓库提供两种跑法，功能完全一样：
 
-- **双击 `wb-manager.exe`**（推荐）——不用装 Python，不弹命令行窗口。exe 在本仓库的 [Releases](https://github.com/LL887526/wb-manager/releases) 页下载
+- **双击 `wb-manager.exe`**（推荐）——不用装 Python，不弹命令行窗口。exe 在本仓库的 [Releases](https://github.com/LYC-03/wb-manager/releases) 页下载
 - 双击 `启动.bat` 用源码跑——需要 Python 3.9+
 
 两种打开后都是独立应用窗口（没有地址栏和标签页），**关掉窗口进程就退出**，不在后台常驻。
@@ -156,7 +156,7 @@ WorkBuddy 我用了大半年，侧栏里堆了一百多条会话，一大半叫�
 
 ### 方式 A：双击 `wb-manager.exe`（推荐）
 
-从 [Releases](https://github.com/LL887526/wb-manager/releases) 页下载 `wb-manager.exe`，放到一个自己找得到的位置（比如桌面新建一个文件夹），双击就行，不弹命令行窗口，一两秒后出现一个独立应用窗口。
+从 [Releases](https://github.com/LYC-03/wb-manager/releases) 页下载 `wb-manager.exe`，放到一个自己找得到的位置（比如桌面新建一个文件夹），双击就行，不弹命令行窗口，一两秒后出现一个独立应用窗口。
 
 | 行为 | 表现 |
 |---|---|
