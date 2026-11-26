@@ -709,7 +709,7 @@ tbody tr{animation:rowfade .15s ease-out}
       <path d="M16 3.2V6.6h-3.4" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
   </span>
-  <span class="rbtext" id="restartText">改动已写入，重启 WorkBuddy 才看得到</span>
+  <span class="rbtext" id="restartText">改动已写入。WorkBuddy 只在启动时读一次数据库，关掉重开才看得到变化。</span>
   <button class="btn" id="btnRestartWb">重启 WorkBuddy</button>
   <button class="btn ghost" id="btnRestartHide">待会再说</button>
 </div>
@@ -1240,7 +1240,7 @@ async function api(path, body){
 function showRestartBar(text){
   const bar = $('restartBar');
   if (!bar) return;
-  $('restartText').textContent = text || '改动已写入，重启 WorkBuddy 才看得到';
+  $('restartText').textContent = text || '改动已写入。WorkBuddy 只在启动时读一次数据库，关掉重开才看得到变化。';
   bar.hidden = false;
 }
 
@@ -1253,11 +1253,14 @@ async function restartWorkbuddy(force){
   try{
     const r = await api('/api/wb/restart', {force: !!force});
     if (r.need_confirm){
-      // 有会话刚被写过，说明 AI 正在干活，掐掉会丢内容——先问一次
-      const who = (r.busy || []).map(x => '· ' + x.title).join('\n');
-      const go = await ask(`有 ${r.busy_count} 条会话正在使用中，重启会把正在进行的 AI 任务中断：\n\n` +
-        `${who || '（标题读取中）'}\n\n` +
-        `如果你手头没有正在跑的对话，继续就行；有的话先等它结束。`, '仍然重启');
+      // 有会话刚被写过，说明 AI 正在干活，掐掉会丢内容——先问一次。
+      // 刻意不列出会话标题：一长串标题会让人以为工具在翻他的对话，反而吓人。
+      const go = await ask(
+        `现在还有 ${r.busy_count} 个对话开着，重启会把它们中断。\n\n` +
+        `不着急的话，先把手头的对话说完再重启。\n\n` +
+        `「重启」就是关掉 WorkBuddy 再打开，工具替你点这两下。\n` +
+        `这是正常操作，不是病毒，也不会动你的任何文件。`,
+        '现在重启');
       if (!go) return;
       return await restartWorkbuddy(true);
     }

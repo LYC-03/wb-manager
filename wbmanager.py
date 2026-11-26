@@ -564,6 +564,10 @@ def load_sessions():
             # 规则认不出类型 ≠ 还需要确认，不该天天挂着催。
             "conflict": s["conflict"] and source == "rule" and not cur,
             "auto": bool(r["is_background_automation"]),
+            # WorkBuddy 自带的固定会话（「助理」）。它不是定时任务，但同样不该被整理：
+            # 加前缀会让侧栏出现两个「助理」，挪空间等于把它从原位置挖走。
+            # 规则层已返回原名，这里再标一次，供筛选、一键整理、搬目录各处统一排除。
+            "reserved": rules.is_reserved(r),
             "archived": (r["status"] or "").lower() == "archived",
             "active": _is_active(r, now, _session_file),
             "status": r["status"],
@@ -1229,6 +1233,7 @@ def apply_titles(pairs):
     con = connect(write=True)
     changed = 0
     skipped_auto = 0
+    skipped_reserved = 0
     try:
         with con:
             for p in pairs:
@@ -1240,9 +1245,15 @@ def apply_titles(pairs):
                 if not t or not p.get("id"):
                     continue
                 cur = con.execute(
-                    "SELECT custom_title, is_background_automation FROM sessions WHERE id=?",
+                    "SELECT custom_title, title, is_background_automation"
+                    " FROM sessions WHERE id=?",
                     (p["id"],)).fetchone()
                 if cur is None:
+                    continue
+                # ⛔ 同定时任务：WorkBuddy 自带的会话（「助理」）标题一律不写。
+                # 这是全工具最后一道闸，AI 命名 / 手动应用 / 一键整理都过不去。
+                if rules.is_reserved(cur):
+                    skipped_reserved += 1
                     continue
                 # ⛔ 铁律（2026-11-24）：所有定时任务的标题一律不写，这是全工具最后一道闸。
                 # 上面有 AI 命名、手动应用、一键整理、历史收敛好几个入口，逐个堵容易漏；
@@ -1266,6 +1277,8 @@ def apply_titles(pairs):
         out["need_restart"] = True
     if skipped_auto:
         out["skipped_auto"] = skipped_auto
+    if skipped_reserved:
+        out["skipped_reserved"] = skipped_reserved
     return out
 
 
@@ -2950,6 +2963,9 @@ def organize_all(dry_run=False):
         x for x in items
         if x["changed"] and not x["conflict"] and not x["active"]
         and not x["archived"] and not x["auto"]
+        # 「助理」这类 WorkBuddy 自带的会话一律不进候选，理由同定时任务：
+        # 它不是用户的工作记录，改它等于动了系统自带的入口。
+        and not x.get("reserved")
     ]
     if dry_run:
         return {
@@ -3181,8 +3197,8 @@ def preview_move(pairs):
         sid = p.get("id")
         new_cwd = rules.norm_path((p.get("cwd") or "").strip())
         row = con.execute(
-            "SELECT cwd, is_background_automation, "
-            "COALESCE(custom_title, title) t FROM sessions WHERE id=?",
+            "SELECT cwd, is_background_automation, custom_title, title"
+            " FROM sessions WHERE id=?",
             (sid,)).fetchone()
         if row is None:
             out.append({"id": sid, "title": "（会话不存在）", "status": "跳过",
@@ -3194,7 +3210,11 @@ def preview_move(pairs):
         dst = dst_dir / f"{sid}.jsonl"
 
         status, why = "可搬", ""
-        if row["is_background_automation"]:
+        if rules.is_reserved(row):
+            # 同定时任务：WorkBuddy 自带的会话不参与任何归类，
+            # 挪走会让侧栏里原本那个固定入口多出一份。
+            status, why = "跳过", "WorkBuddy 自带会话，不参与归类"
+        elif row["is_background_automation"]:
             # ⛔ 铁律：定时任务只读。挪目录也是一种归类，一并不参与。
             status, why = "跳过", "定时任务只读，不参与归类"
         elif rules.norm_path(old_cwd) == new_cwd:
@@ -3212,7 +3232,7 @@ def preview_move(pairs):
 
         size = src.stat().st_size if src.exists() else 0
         out.append({
-            "id": sid, "title": row["t"] or "",
+            "id": sid, "title": (row["custom_title"] or row["title"] or ""),
             "from": old_cwd, "to": new_cwd,
             "from_dir": src.parent.name, "to_dir": dst_dir.name,
             "file": str(src), "size": size,
@@ -3340,7 +3360,8 @@ def move_sessions(pairs):
                 if not sid or not new_cwd:
                     continue
                 row = con.execute(
-                    "SELECT cwd, is_background_automation FROM sessions WHERE id=?",
+                    "SELECT cwd, is_background_automation, custom_title, title"
+                    " FROM sessions WHERE id=?",
                     (sid,)).fetchone()
                 if row is None:
                     continue
@@ -3348,6 +3369,9 @@ def move_sessions(pairs):
                 # 防止有人绕过界面直接调接口把定时任务搬走。
                 if row["is_background_automation"]:
                     blocked.append({"id": sid, "why": "定时任务只读，不搬运"})
+                    continue
+                if rules.is_reserved(row):
+                    blocked.append({"id": sid, "why": "WorkBuddy 自带会话，不搬运"})
                     continue
                 old_cwd = row["cwd"] or ""
                 if rules.norm_path(old_cwd) == new_cwd:

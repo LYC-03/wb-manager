@@ -114,6 +114,31 @@ def mmdd(ms):
     return time.strftime("%m-%d", time.localtime((ms or 0) / 1000))
 
 
+# WorkBuddy 自带、不该被整理的固定会话。
+# 目前只认「助理」：它是 WorkBuddy 内置的助手对话，侧栏本来就有一个入口。
+# 工具要是给它加 emoji、挪空间，侧栏里就会冒出两个「助理」，用户会以为工具改了系统。
+# 判断前先剥掉前导 emoji 与符号，否则已经被改过一次的「🛠️ 助理」会漏判。
+RESERVED_TITLES = {"助理"}
+
+
+def _field(row, key):
+    """取字段，兼容 dict 与 sqlite3.Row（后者没有 .get）。"""
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def is_reserved(row):
+    """这条会话是不是 WorkBuddy 自带、必须原样留着的那种。"""
+    for k in ("custom_title", "title"):
+        v = (_field(row, k) or "").strip()
+        v = re.sub(r"^[^\w\u4e00-\u9fa5]+", "", v).strip()
+        if v in RESERVED_TITLES:
+            return True
+    return False
+
+
 def suggest(row, style="emoji"):
     """给一条会话算建议标题。
 
@@ -139,6 +164,16 @@ def suggest(row, style="emoji"):
         if style == "date":
             return f"{mmdd(row.get('created_at'))} {name}"
         return f"{emoji} {name}" if emoji else name
+
+    if is_reserved(row):
+        # 和定时任务同一个道理：直接返回原名，after == raw 时 changed 恒为 False，
+        # 它就不会出现在待改清单里，一键整理也筛不到，写库层还有第二道闸。
+        return {
+            "after": raw,
+            "emoji": "🛠️", "type_name": "内置",
+            "why": "WorkBuddy 自带会话（如「助理」）：保持原名，不参与整理",
+            "conflict": False,
+        }
 
     if is_auto:
         # ⛔ 铁律（2026-11-24 用户定死）：is_background_automation=1 的会话一律只读，
