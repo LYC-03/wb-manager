@@ -528,7 +528,18 @@ def load_sessions():
     for r in rows:
         cur = (r["custom_title"] or "").strip()
         raw = (r["title"] or "").strip()
-        s = rules.suggest(r, style=naming_style)
+        # 没自己起过名、又不是定时任务的，才去读对话定主题。
+        # 只读文件头 512KB（主题都在前 2%），35 条加起来不到半秒；
+        # 用户已经起过名的直接跳过，不白读。
+        digest = None
+        if not cur and not r["is_background_automation"]:
+            try:
+                p = find_esc_dir(r["cwd"] or "") / f"{r['id']}.jsonl"
+                if p.exists():
+                    digest = rules.read_digest_brief(p)
+            except OSError:
+                digest = None
+        s = rules.suggest(r, style=naming_style, digest=digest)
         after = s["after"]
         source = "rule"
         why = s["why"]
@@ -563,6 +574,9 @@ def load_sessions():
             # 用户自己改过名的（custom_title 非空）说明人家已经定了性，
             # 规则认不出类型 ≠ 还需要确认，不该天天挂着催。
             "conflict": s["conflict"] and source == "rule" and not cur,
+            # 对话里翻不出主题时，名字保留原样并标成「待命名」：
+            # 它不进待改清单（after == raw），但在界面上单独提示，说明判断依据。
+            "pending": bool(s.get("pending")),
             "auto": bool(r["is_background_automation"]),
             # WorkBuddy 自带的固定会话（「助理」）。它不是定时任务，但同样不该被整理：
             # 加前缀会让侧栏出现两个「助理」，挪空间等于把它从原位置挖走。
@@ -614,6 +628,10 @@ def stats(items):
         "manual": sum(1 for i in items if not i["auto"]),
         "archived": sum(1 for i in items if i["archived"]),
         "need_change": sum(1 for i in items if i["changed"] and not i["archived"]),
+        # 对话里翻不出主题、名字只能原样留着的。不进待改清单，但要让人看得到，
+        # 否则用户会以为「工具没处理这条」，其实是这条确实没信息可依。
+        "pending": sum(1 for i in items
+                        if i.get("pending") and not i["archived"]),
         "conflict": sum(1 for i in items if i["conflict"] and not i["archived"]),
         "groups": len(groups),
         "dup_groups": len(dup_groups),

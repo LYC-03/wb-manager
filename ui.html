@@ -1319,6 +1319,9 @@ function renderFilters(){
   const renamed = (STATE.items || []).filter(x=>x.has_custom && !x.auto).length;
   const fs = [
     ['change','待改 ('+(s.need_change||0)+')'],
+    // 只有真出现「对话里没有信息可依」的会话时才显示这一格，
+    // 否则一个恒为 0 的按钮只会让人以为工具有个功能没生效
+    ...(s.pending ? [['pending','待命名 ('+s.pending+')']] : []),
     ['conflict','需确认 ('+(s.conflict||0)+')'],
     ['renamed','已改名 ('+renamed+')'],
     ['all','全部 ('+(s.total||0)+')'],
@@ -1416,6 +1419,7 @@ function filtered(){
   else if (FILTER==='all') arr = it;
   else if (FILTER==='renamed') arr = it.filter(x=>x.has_custom && !x.archived);
   else if (FILTER==='change') arr = it.filter(x=>x.changed && !x.archived);
+  else if (FILTER==='pending') arr = it.filter(x=>x.pending && !x.archived);
   else if (FILTER==='auto') arr = it.filter(x=>x.auto && !x.archived);
   else if (FILTER==='manual') arr = it.filter(x=>!x.auto && !x.archived);
   else if (FILTER==='conflict') arr = it.filter(x=>x.conflict && !x.archived);
@@ -1504,17 +1508,22 @@ function renderTable(){
       : '';
     const state = x.archived ? '<span class="tag bad">已归档</span>'
       : (x.auto ? '<span class="tag blue">定时</span>'
+      : (x.pending ? '<span class="tag warn">待命名</span>'
       : (x.conflict ? '<span class="tag warn">需确认</span>'
-      : (x.changed ? '<span class="tag blue">待改</span>' : '<span class="tag">已合规</span>')));
+      : (x.changed ? '<span class="tag blue">待改</span>' : '<span class="tag">已合规</span>'))));
     // 自己起过名、且和当前一致：不再重复摆一个输入框，免得两列一模一样。
     // 「需确认」的行必须保留输入框——那是用户就地改名的地方，不能吞。
     // 定时任务连输入框都不给：标题归 WorkBuddy 管，这里给了框也写不进去，
     // 点了没反应比直接不给框更让人困惑。
     const sugCell = x.auto
       ? `<td class="sug"><span class="same" title="定时任务的标题由 WorkBuddy 维护，这个工具不改">保持原名</span></td>`
-      : ((x.has_custom && x.suggest === x.current && !x.conflict)
-        ? `<td class="sug"><span class="same">已是这个名字</span></td>`
-        : `<td class="sug"><input type="text" data-i="${i}" value="${esc(x.suggest)}" spellcheck="false"></td>`);
+      // 待命名的：对话里翻不出主题，工具不替它编一个。留个空框让人自己填，
+      // 不填就保持原名。填了原名的框会被当成「建议改名叫原名」，反而误导。
+      : (x.pending
+        ? `<td class="sug"><input type="text" data-i="${i}" value="" placeholder="起个名字（不填就保持原名）" spellcheck="false"></td>`
+        : ((x.has_custom && x.suggest === x.current && !x.conflict)
+          ? `<td class="sug"><span class="same">已是这个名字</span></td>`
+          : `<td class="sug"><input type="text" data-i="${i}" value="${esc(x.suggest)}" spellcheck="false"></td>`));
     return `<tr data-id="${esc(x.id)}"${x.archived?' class="isarch"':''}${x.active?' data-live="1"':''}>
       <td class="pick"><input type="checkbox" data-i="${i}" ${SEL.has(x.id)?'checked':''}></td>
       <td class="cur">${state}<span title="${esc(x.current)}">${esc(x.current)}</span></td>

@@ -11,14 +11,16 @@ import time
 # 后面是扩展类：AI 日常可能做的其他事情。扩展类放在老类后面——
 # 老类关键词更宽（比如"配置""功能"），先让老类兜住，兜不住再落扩展类。
 TYPE_RULES = [
-    ("🐛", "排查", ["报错", "调试", "异常", "黑屏", "卡顿", "闪退", "死机", "崩溃", "失败", "故障", "排查", "兼容", "掉帧", "耗电"]),
+    ("🐛", "排查", ["报错", "调试", "异常", "黑屏", "卡顿", "闪退", "死机", "崩溃", "失败", "故障", "排查", "兼容", "掉帧", "耗电",
+                   "修复", "修好", "不生效", "没反应", "打不开", "重复", "错乱", "失效"]),
     ("🗂️", "整理", ["整理", "清理", "归档", "迁移", "盘点", "备份", "收纳", "恢复", "删除"]),
     ("🎬", "制作", ["剪辑", "出片", "素材", "镜头", "调色", "片头", "成片", "混剪", "字幕", "配音", "拍摄"]),
     ("📝", "文案", ["文案", "选题", "口播", "爆款", "笔记", "简介", "描述", "脚本内容", "短文案"]),
     ("💰", "事务", ["报销", "发票", "税务", "社保", "记账", "账单", "对账", "工资", "合同", "欠款",
                    "退款", "理赔", "押金", "缴费", "还款", "票务"]),
     ("🛠️", "开发", ["开发", "编程", "代码", "脚本", "插件", "接口", "api", "数据库", "前后端",
-                    "框架", "编译", "部署", "调试", "函数", "组件", "重构", "环境", "依赖"]),
+                    "框架", "编译", "部署", "调试", "函数", "组件", "重构", "环境", "依赖",
+                    "程序", "写个工具", "命令行"]),
     ("🔍", "调研", ["调研", "资料", "查证", "科普", "背景", "原理", "由来", "行业", "市场"]),
     # ---- 扩展类型：AI 日常可能做的其他事情 ----
     ("✍️", "写作", ["写一", "帮我写", "文章", "作文", "周报", "日报", "总结", "汇报", "演讲",
@@ -27,7 +29,8 @@ TYPE_RULES = [
     ("📊", "分析", ["数据", "统计", "报表", "透视", "图表", "分析", "复盘", "归因", "可视化"]),
     ("🎓", "学习", ["教程", "讲解", "学习", "入门", "教学", "课程", "题目", "作业", "论文", "文献", "概念"]),
     ("🎨", "设计", ["海报", "封面", "配图", "logo", "图标", "配色", "排版", "设计稿", "原型", "草图", "字体"]),
-    ("🖥️", "系统", ["电脑", "驱动", "显卡", "内存", "硬盘", "网络", "wifi", "路由", "重装", "蓝屏", "越狱", "刷机"]),
+    ("🖥️", "系统", ["电脑", "驱动", "显卡", "内存", "硬盘", "网络", "wifi", "路由", "重装", "蓝屏", "越狱", "刷机",
+                    "电池", "充电", "主板", "发热", "温度", "风扇", "开机"]),
     ("🏃", "健康", ["健身", "训练", "饮食", "热量", "蛋白", "睡眠", "体检", "用药", "症状", "康复",
                    "减脂", "增肌", "拉伸", "作息"]),
     ("🧠", "情绪", ["情绪", "焦虑", "内耗", "心理", "倾诉", "安慰", "emo", "压力"]),
@@ -139,7 +142,7 @@ def is_reserved(row):
     return False
 
 
-def suggest(row, style="emoji"):
+def suggest(row, style="emoji", digest=None):
     """给一条会话算建议标题。
 
     row 需要: title, custom_title, cwd, created_at, is_background_automation
@@ -147,8 +150,11 @@ def suggest(row, style="emoji"):
              emoji = "🗂️ 整理｜主题"（默认）
              plain = "整理｜主题"（纯文字）
              date  = "08-11 主题"（日期打头，适合按时间翻）
+    digest:  可选，read_digest_brief 的结果。用户没自己起名时，
+             命名以对话内容为准，没有 digest 才退回看标题。
 
-    返回 dict: {after, emoji, type_name, why, conflict}
+    返回 dict: {after, emoji, type_name, why, conflict, pending}
+    pending=True 表示「对话信息不足，保留原名等你确认」，不进待改清单。
     """
     raw = re.sub(r"\s+", " ", (row.get("custom_title") or row.get("title") or "").strip())
     if style == "date":
@@ -193,12 +199,37 @@ def suggest(row, style="emoji"):
             "conflict": False,
         }
 
-    body = EMOJI_ANY.sub("", raw).strip() or raw
-    emoji, tname, why = classify(body, row.get("cwd"))
+    cur = (row.get("custom_title") or "").strip()
+
+    # 用户自己起过名的，尊重原样；没起过名的，名字必须从对话内容里定，
+    # 不能拿「新建会话 2026-08-11 2030」加个 emoji 糊过去。
+    if cur:
+        body = EMOJI_ANY.sub("", raw).strip() or raw
+        topic_src = "你自己起的名字"
+    else:
+        topic, topic_src = pick_topic(digest, row)
+        if topic is None:
+            # 信息不足就不硬造。保留原名，标成待命名，把判断依据说清楚，
+            # 让用户知道「不是没处理，是这条确实看不出在干什么」。
+            return {
+                "after": raw,
+                "emoji": "", "type_name": "待命名",
+                "why": f"没法定名字：{topic_src}。保留原名，等你手动定一下",
+                "conflict": False,
+                "pending": True,
+            }
+        body = topic
+
+    # 类型判断用「内容主题 + 原标题 + 目录」一起看：主题决定它是什么，
+    # 标题和目录补上类型线索。emoji 只是最后贴上去的装饰，不参与命名。
+    emoji, tname, why_cls = classify(f"{body} {row.get('title') or ''}", row.get("cwd"))
+    if topic_src in ("WorkBuddy 生成的对话标题", "对话第一条消息"):
+        why = f"读了{topic_src}，按实际做的事命名"
+    else:
+        why = why_cls or f"按{topic_src}整理"
 
     # 已经有正确前缀的，不动（仅 emoji 风格下；其他风格统一重排）
     if style == "emoji" and body == raw and EMOJI_ANY.match(raw) and SEP in raw:
-        # 形如 "🛠️ 主题｜动作"，判断前缀是否合理
         cur_emoji = EMOJI_ANY.match(raw).group(0).strip()
         if cur_emoji in tuple(e for e, _, _ in TYPE_RULES) + ("💬", "🔁"):
             return {"after": raw, "emoji": cur_emoji, "type_name": tname,
@@ -207,12 +238,175 @@ def suggest(row, style="emoji"):
     after = _fmt(emoji, body)
     return {
         "after": after, "emoji": emoji, "type_name": tname,
-        "why": why or "没认出这条在干什么，需要你人工定一下",
-        "conflict": not why,
+        "why": why,
+        # 类型没认出来不算「需确认」——名字是从对话内容里定出来的，
+        # 只是归不到哪个类型，不影响用。真要挂个「待确认」，用户会以为工具没干活。
+        "conflict": False,
+        "pending": False,
     }
 
 
 # ---------- 读会话内容（给 AI 命名用，只读不改）----------
+
+# ---------- 从对话内容里定主题 ----------
+#
+# 光看标题定不出「这条在干什么」：WorkBuddy 的默认标题是「新建会话 2026-08-11 2030」，
+# 在这种标题后面加个 emoji，等于什么都没改。所以命名必须回到对话本身。
+#
+# 两个来源，按可信度排：
+#   1. jsonl 里的 ai-title —— WorkBuddy 自己根据对话生成的主题，通常最准
+#   2. 用户的第一条消息 —— 退而求其次，从原话里提炼
+# 实测这两样都在文件前 2% 以内（29MB 的会话里 ai-title 出现在 1.9% 处），
+# 所以只读文件头，不读完整份——全量读 35 条要 7.9 秒，只读头不到 0.4 秒。
+
+# WorkBuddy 建的模板标题，这些名字本身不携带任何信息
+TEMPLATE_TITLE = re.compile(
+    r"^(新建会话|新会话|新对话|未命名|无标题|会话|新建任务|新任务|"
+    r"untitled|new chat|new conversation|chat)\s*[\d\-:：\s]*$", re.I)
+
+# 开头这些词是客套或指代，不构成主题。
+# 按长度从长到短排，避免「帮我」先命中把「帮我看看」拆成两半。
+LEAD_NOISE = ("帮我看看", "帮我看下", "帮我", "帮忙", "麻烦你", "麻烦一下", "麻烦",
+              "我想问问", "我想问", "我想", "我要", "我需要", "请问", "你好",
+              "现在", "那个", "这个", "看看", "看下", "看一下", "问一下",
+              "能帮", "可以帮", "希望你", "希望", "需要你")
+
+
+def is_template_title(s):
+    """这个标题是不是「什么都没说」的模板名。"""
+    s = (s or "").strip()
+    if not s:
+        return True
+    if TEMPLATE_TITLE.match(s):
+        return True
+    # 纯日期 / 纯数字，同样没有信息
+    return bool(re.fullmatch(r"[\d\s\-:：./]+", s))
+
+
+# 这些词不承载主题，去掉不影响语义，但留着会白占标题长度、
+# 把后面真正有信息的部分（比如「失败」）挤出截断范围。
+FILLER_RE = re.compile(r"(为什么|怎么样|一直|总是|老是|到底|究竟|请问)")
+# 截断后可能刚好停在半个疑问词上，再收一次尾
+TAIL_NOISE = re.compile(
+    r"(为什么|怎么样|怎么回事|怎么回|怎么|如何|一直|总是|到底是|是不是|是|的|吗|呢|啊)$")
+
+
+def clean_topic(text, limit=18):
+    """把用户原话收成一个短主题。
+
+    不做「猜意图」那种事，只做三件事：去掉客套、去掉不承载主题的填充词、
+    超长时在标点处断。宁可短一点、粗一点，也不要把整句原话搬过来当标题。
+    """
+    s = re.sub(r"\s+", " ", (text or "")).strip()
+    if not s:
+        return ""
+    # 只取第一句：主题一般在开头，后面都是背景交代
+    s = re.split(r"[。！？!?\n]", s)[0].strip()
+    changed = True
+    while changed and s:
+        changed = False
+        for w in LEAD_NOISE:
+            if s.startswith(w):
+                s = s[len(w):].strip(" ，,、：:")
+                changed = True
+    s = FILLER_RE.sub("", s).strip(" ，,、：:")
+    # 一句话里第一个逗号前通常就是主题，后面是「帮我彻底检查一下」这类补充。
+    # 前段够长就直接用它，比硬截断干净。
+    head = re.split(r"[，,、；;]", s)[0].strip()
+    if len(head) >= 6 and len(head) < len(s):
+        s = head
+    if len(s) > limit:
+        parts = re.split(r"[，,、；;：:]", s)
+        acc = ""
+        for seg in parts:
+            seg = seg.strip()
+            if not seg:
+                continue
+            if len(acc) + len(seg) > limit:
+                break
+            acc += ("，" if acc else "") + seg
+        if acc:
+            s = acc
+        else:
+            cut = s[:limit]
+            # 断点后紧跟的还是汉字，说明切在词中间，退一个字。
+            # 不退会出现「进行了一波调整升」这种半截词，比短一点难看得多。
+            if len(s) > limit and re.match(r"[\u4e00-\u9fa5]", s[limit]):
+                cut = cut[:-1]
+            s = cut
+    while True:
+        t = TAIL_NOISE.sub("", s).strip(" ，,、。！？：:;；")
+        # 删到只剩一两个字就停：再删就不成一个主题了
+        if t == s or len(t) < 2:
+            break
+        s = t
+    return s.strip(" ，,。！？、：:;；")
+
+
+def read_digest_brief(path, max_bytes=2 * 1024 * 1024):
+    """只读文件头，取会话主题。读不动返回空结构，绝不抛异常。
+
+    上限设 2MB 是为了对付前面塞满 teammate-message / system-reminder 的会话：
+    那些块会被 _clean 丢掉，真实提问可能排在很后面。
+    好在绝大多数会话在前几十 KB 就两样都拿到了，会提前 break。
+    """
+    out = {"ai_title": "", "first_user": "", "users": []}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            used = 0
+            for line in fh:
+                used += len(line)
+                if used > max_bytes:
+                    break
+                if '"ai-title"' not in line and '"message"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                t = d.get("type")
+                if t == "ai-title":
+                    v = (d.get("aiTitle") or "").strip()
+                    if v:
+                        out["ai_title"] = v     # 取最后一条：越往后越贴近真实内容
+                elif t == "message" and d.get("role") == "user":
+                    txt = _msg_text(d.get("content"))
+                    if txt and len(out["users"]) < 2:
+                        out["users"].append(txt[:400])
+                # 两样都拿到了就没必要继续读
+                if out["users"] and out["ai_title"]:
+                    break
+    except OSError:
+        pass
+    out["first_user"] = out["users"][0] if out["users"] else ""
+    return out
+
+
+def pick_topic(digest, row):
+    """定出这条会话在干什么。返回 (主题, 来源说明)；定不出来返回 (None, 原因)。
+
+    顺序是「AI 标题 → 用户第一句 → 原标题」，谁先给出可用主题就用谁。
+    """
+    digest = digest or {}
+    # AI 生成的标题本身已经是提炼过的，可以长一点；从用户原话里抠出来的要收紧，
+    # 否则会拖一串背景交代进来。硬截断会把「修复会话标题重复叠加」切成半句，
+    # 反而比不改还糟，所以这两档长度必须分开。
+    candidates = [
+        (digest.get("ai_title"), "WorkBuddy 生成的对话标题", 32),
+        (digest.get("first_user"), "对话第一条消息", 18),
+        (row.get("title"), "原标题", 18),
+    ]
+    for text, src, lim in candidates:
+        if not text:
+            continue
+        if is_template_title(text):
+            continue
+        topic = clean_topic(text, limit=lim)
+        # 太短的（一个字、两个字）也当没信息，撑不起一个能区分的名字
+        if len(topic) >= 2:
+            return topic, src
+    return None, "标题是模板名，对话里也没有可用的第一条消息"
+
 
 def read_digest(path, max_users=3, max_chars=180, max_tools=12):
     """从会话 jsonl 里提取一段摘要，用于让模型理解这次会话到底做了什么。
@@ -275,12 +469,30 @@ def _msg_text(content):
 SYS_PREFIX = ("<system-reminder", "<user_info", "<identity_context", "<memory", "<user_memory")
 
 
+# 会话里被注入的上下文块。用户的真实提问经常跟这些块拼在同一条消息里：
+#   [{'type':'input_text','text':'<system-reminder><user_info>OS Version…</user_info></system-reminder>帮我看看电池…'}]
+# 直接按「以 < 开头就丢掉」处理，会把用户真正说的话一起扔掉——
+# 实测 45MB 的会话里 37 条消息全是这样，结果一条主题都提不出来。
+INJECT_TAGS = ("system-reminder", "user_info", "identity_context", "user_memory",
+               "memory", "project_context", "current-expert", "connector-status",
+               "additional-data", "task-notification", "teammate-message",
+               "cb_summary", "wecom_wedrive_references", "expert_selection")
+
+
+def _strip_inject(s):
+    """把注入块整段剥掉，留下用户自己写的那部分。"""
+    for tag in INJECT_TAGS:
+        s = re.sub(r"<%s\b[^>]*>.*?</%s>" % (tag, tag), " ", s, flags=re.S | re.I)
+    # 剥完还剩未闭合的残标签，一起清掉
+    s = re.sub(r"</?[a-zA-Z][\w-]*(?:\s[^>]*)?>", " ", s)
+    return s
+
+
 def _clean(s):
     s = (s or "").strip()
     if not s:
         return ""
-    # 系统注入的块：<system-reminder> <task-notification> <cb_summary> <user_info> ...
-    # 真实提问极少以 < 开头，这类一律当噪音丢掉
-    if s.startswith("<") and ">" in s[:60]:
-        return ""
-    return re.sub(r"\s+", " ", s).strip()
+    if "<" in s:
+        s = _strip_inject(s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
